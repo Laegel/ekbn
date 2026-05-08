@@ -1,4 +1,4 @@
-import { initApp } from './app.js';
+import { initApp } from './app';
 import './styles/style.css';
 
 const custom = document.createElement('link');

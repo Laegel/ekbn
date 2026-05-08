@@ -1,20 +1,45 @@
 import { marked } from 'marked';
 
-export function initApp() {
-  const board = document.getElementById("board");
-  const cardDialog = document.getElementById("card-dialog");
-  const cardForm = document.getElementById("card-form");
-  const contentInput = document.getElementById("card-content-input");
-  const columnDialog = document.getElementById("column-dialog");
-  const columnForm = document.getElementById("column-form");
-  const mdEditor = document.getElementById("md-editor");
-  const categoriesList = document.getElementById("categories-list");
-  const categoriesInput = document.getElementById("card-categories-input");
-  const commentsList = document.getElementById("comments-list");
-  const commentInput = document.getElementById("card-comment-input");
-  const addCommentBtn = document.getElementById("add-comment-btn");
+interface Card {
+  filename: string;
+  title: string;
+  content?: string;
+  updated: string;
+  priority?: number;
+  role?: string;
+  blocked?: boolean;
+  categories?: string[];
+  comments?: Comment[];
+}
 
-  let currentCategories = [];
+interface Comment {
+  author: string;
+  text: string;
+  created: string;
+}
+
+interface ColumnData {
+  id: string;
+  slug: string;
+  name: string;
+  cards: Card[];
+}
+
+export function initApp() {
+  const board = document.getElementById("board")!;
+  const cardDialog = document.getElementById("card-dialog") as HTMLDialogElement;
+  const cardForm = document.getElementById("card-form") as HTMLFormElement;
+  const contentInput = document.getElementById("card-content-input") as HTMLTextAreaElement;
+  const columnDialog = document.getElementById("column-dialog") as HTMLDialogElement;
+  const columnForm = document.getElementById("column-form") as HTMLFormElement;
+  const mdEditor = document.getElementById("md-editor")!;
+  const categoriesList = document.getElementById("categories-list")!;
+  const categoriesInput = document.getElementById("card-categories-input") as HTMLInputElement;
+  const commentsList = document.getElementById("comments-list")!;
+  const commentInput = document.getElementById("card-comment-input") as HTMLInputElement;
+  const addCommentBtn = document.getElementById("add-comment-btn")!;
+
+  let currentCategories: string[] = [];
   let currentColumn = "";
   let currentFilename = "";
   let localMoveInProgress = false;
@@ -25,7 +50,7 @@ export function initApp() {
   });
 
   let editingMarkdown = false;
-  let previewEl = null;
+  let previewEl: HTMLElement | null = null;
 
   function showMarkdownEdit() {
     editingMarkdown = true;
@@ -48,7 +73,7 @@ export function initApp() {
     const raw = contentInput.value;
     if (raw.trim()) {
       previewEl.className = "md-preview";
-      previewEl.innerHTML = marked.parse(raw);
+      previewEl.innerHTML = marked.parse(raw) as string;
     } else {
       previewEl.className = "md-preview empty";
       previewEl.textContent = "Click to write Markdown...";
@@ -64,26 +89,26 @@ export function initApp() {
 
   const es = new EventSource("/api/events");
 
-  es.addEventListener("card-created", (e) => {
+  es.addEventListener("card-created", (e: MessageEvent) => {
     if (localMoveInProgress) return;
-    const data = JSON.parse(e.data);
+    const data = JSON.parse(e.data) as { column: string; card: Card };
     animateCardCreated(data.column, data.card);
     updateColumnCount(data.column);
   });
-  es.addEventListener("card-deleted", (e) => {
+  es.addEventListener("card-deleted", (e: MessageEvent) => {
     if (localMoveInProgress) return;
-    const data = JSON.parse(e.data);
+    const data = JSON.parse(e.data) as { column: string; filename: string };
     animateCardDeleted(data.column, data.filename);
     updateColumnCount(data.column);
   });
-  es.addEventListener("card-updated", (e) => {
+  es.addEventListener("card-updated", (e: MessageEvent) => {
     if (localMoveInProgress) return;
-    const data = JSON.parse(e.data);
+    const data = JSON.parse(e.data) as { column: string; card: Card };
     animateCardUpdated(data.column, data.card);
   });
-  es.addEventListener("card-moved", (e) => {
+  es.addEventListener("card-moved", (e: MessageEvent) => {
     if (localMoveInProgress) return;
-    const data = JSON.parse(e.data);
+    const data = JSON.parse(e.data) as { fromColumn: string; toColumn: string; card: Card };
     animateCardMove(data.fromColumn, data.toColumn, data.card);
   });
   es.addEventListener("column-reordered", () => {
@@ -91,12 +116,7 @@ export function initApp() {
     loadBoard();
   });
 
-  marked.setOptions({
-    breaks: true,
-    gfm: true,
-  });
-
-  categoriesInput.addEventListener("keydown", (e) => {
+  categoriesInput.addEventListener("keydown", (e: KeyboardEvent) => {
     if (e.key === ",") {
       e.preventDefault();
       const val = categoriesInput.value.trim();
@@ -126,19 +146,19 @@ export function initApp() {
     });
     categoriesList.querySelectorAll(".remove-cat").forEach((btn) => {
       btn.addEventListener("click", () => {
-        currentCategories.splice(parseInt(btn.dataset.index), 1);
+        currentCategories.splice(parseInt((btn as HTMLElement).dataset.index!), 1);
         renderCategoryPills();
       });
     });
   }
 
-  function setCategories(cats) {
+  function setCategories(cats: string[]) {
     currentCategories = [...cats];
     renderCategoryPills();
     categoriesInput.value = "";
   }
 
-  function getCategories() {
+  function getCategories(): string[] {
     return [...currentCategories];
   }
 
@@ -148,22 +168,21 @@ export function initApp() {
     categoriesInput.value = "";
   }
 
-  let draggedCard = null;
-  let draggedColumn = null;
-  let columnDragPlaceholder = null;
+  let draggedCard: HTMLElement | null = null;
+  let draggedColumn: HTMLElement | null = null;
 
   async function loadBoard() {
     try {
       const res = await fetch("/api/columns");
       if (!res.ok) throw new Error("Failed to load columns");
-      const columns = await res.json();
+      const columns = (await res.json()) as ColumnData[];
       renderBoard(columns);
     } catch (err) {
       console.error(err);
     }
   }
 
-  function renderBoard(columns) {
+  function renderBoard(columns: ColumnData[]) {
     board.innerHTML = "";
     columns.forEach((col) => {
       const colEl = document.createElement("div");
@@ -186,7 +205,7 @@ export function initApp() {
               </div>
           `;
 
-      const cardsContainer = colEl.querySelector(".column-cards");
+      const cardsContainer = colEl.querySelector(".column-cards") as HTMLElement;
       col.cards.forEach((card) => {
         cardsContainer.appendChild(createCardElement(card, col.id));
       });
@@ -195,8 +214,8 @@ export function initApp() {
       cardsContainer.addEventListener("dragleave", handleDragLeave);
       cardsContainer.addEventListener("drop", handleDrop);
 
-      const header = colEl.querySelector("[draggable]");
-      header.addEventListener("dragstart", handleColumnDragStart);
+      const header = colEl.querySelector("[draggable]") as HTMLElement;
+      header.addEventListener("dragstart", handleColumnDragStart as EventListener);
       header.addEventListener("dragend", handleColumnDragEnd);
 
       colEl.addEventListener("dragover", handleColumnDragOver);
@@ -205,17 +224,17 @@ export function initApp() {
       colEl.addEventListener("drop", handleColumnDrop);
 
       colEl
-        .querySelector(".add-card-btn")
+        .querySelector(".add-card-btn")!
         .addEventListener("click", () => openCreateCard(col.id));
       colEl
-        .querySelector(".btn-primary")
+        .querySelector(".btn-primary")!
         .addEventListener("click", () => openCreateCard(col.id));
 
       board.appendChild(colEl);
     });
   }
 
-  function createCardElement(card, column) {
+  function createCardElement(card: Card, column: string): HTMLElement {
     const el = document.createElement("div");
     el.className = "card card-sm bg-base-100 shadow-sm cursor-move border border-base-300";
     el.draggable = true;
@@ -227,7 +246,7 @@ export function initApp() {
         ? `<div class="flex flex-wrap gap-1 mt-2">${card.categories.map((c) => `<span class="badge badge-primary badge-sm">${escapeHtml(c)}</span>`).join("")}</div>`
         : "";
 
-    const priorityHtml = card.priority > 0
+    const priorityHtml = card.priority! > 0
       ? `<span class="badge badge-sm ${card.priority === 1 ? 'badge-error' : card.priority === 2 ? 'badge-warning' : 'badge-ghost'}">P${card.priority}</span>`
       : "";
 
@@ -258,11 +277,11 @@ export function initApp() {
 
     el.addEventListener("dragstart", handleDragStart);
     el.addEventListener("dragend", handleDragEnd);
-    el.querySelector("[title='Edit']").addEventListener("click", (e) => {
+    el.querySelector("[title='Edit']")!.addEventListener("click", (e) => {
       e.stopPropagation();
       openEditCard(column, card);
     });
-    el.querySelector("[title='Delete']").addEventListener("click", (e) => {
+    el.querySelector("[title='Delete']")!.addEventListener("click", (e) => {
       e.stopPropagation();
       deleteCard(column, card.filename);
     });
@@ -270,11 +289,11 @@ export function initApp() {
     return el;
   }
 
-  function handleDragStart(e) {
+  function handleDragStart(this: HTMLElement, e: DragEvent) {
     draggedCard = this;
     this.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData(
+    e.dataTransfer!.effectAllowed = "move";
+    e.dataTransfer!.setData(
       "text/plain",
       JSON.stringify({
         filename: this.dataset.filename,
@@ -283,7 +302,7 @@ export function initApp() {
     );
   }
 
-  function handleDragEnd() {
+  function handleDragEnd(this: HTMLElement) {
     this.classList.remove("dragging");
     draggedCard = null;
     document
@@ -291,26 +310,26 @@ export function initApp() {
       .forEach((c) => c.classList.remove("drag-over"));
   }
 
-  function handleDragOver(e) {
+  function handleDragOver(this: HTMLElement, e: DragEvent) {
     e.preventDefault();
     if (draggedColumn) return;
-    e.dataTransfer.dropEffect = "move";
+    e.dataTransfer!.dropEffect = "move";
     this.classList.add("drag-over");
   }
 
-  function handleDragLeave() {
+  function handleDragLeave(this: HTMLElement) {
     this.classList.remove("drag-over");
   }
 
-  async function handleDrop(e) {
+  async function handleDrop(this: HTMLElement, e: DragEvent) {
     e.preventDefault();
     this.classList.remove("drag-over");
 
-    const raw = e.dataTransfer.getData("text/plain");
+    const raw = e.dataTransfer!.getData("text/plain");
     const data = JSON.parse(raw);
     if (data.type === "column") return;
 
-    const toColumn = this.dataset.column;
+    const toColumn = this.dataset.column!;
 
     if (data.fromColumn === toColumn) return;
 
@@ -334,16 +353,16 @@ export function initApp() {
               `.column-cards[data-column="${toColumn}"]`,
             );
             if (dst) {
-              const prioEl = cardEl.querySelector(".badge-sm");
-              const priority = prioEl && prioEl.textContent.startsWith("P") ? parseInt(prioEl.textContent.slice(1)) : 0;
-              const roleEl = cardEl.querySelector(".badge-outline");
-              const role = roleEl ? roleEl.textContent : "";
-              const blockedEl = cardEl.querySelector(".badge-error");
-              const blocked = blockedEl && blockedEl.textContent === "blocked";
+              const prioEl = cardEl.querySelector(".badge-sm") as HTMLElement | null;
+              const priority = prioEl && prioEl.textContent!.startsWith("P") ? parseInt(prioEl.textContent!.slice(1)) : 0;
+              const roleEl = cardEl.querySelector(".badge-outline") as HTMLElement | null;
+              const role = roleEl ? roleEl.textContent! : "";
+              const blockedEl = [...cardEl.querySelectorAll(".badge-error")].find(b => b.textContent === "blocked");
+              const blocked = !!blockedEl;
               const newEl = createCardElement(
                 {
                   filename: data.filename,
-                  title: cardEl.querySelector(".card-title").textContent,
+                  title: cardEl.querySelector(".card-title")!.textContent!,
                   updated: new Date().toISOString(),
                   priority: priority,
                   role: role,
@@ -377,19 +396,19 @@ export function initApp() {
     }
   }
 
-  function handleColumnDragStart(e) {
+  function handleColumnDragStart(this: HTMLElement, e: DragEvent) {
     e.stopPropagation();
-    draggedColumn = this.closest(".column");
+    draggedColumn = this.closest(".column") as HTMLElement;
     draggedColumn.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData(
+    e.dataTransfer!.effectAllowed = "move";
+    e.dataTransfer!.setData(
       "text/plain",
       JSON.stringify({
         type: "column",
         slug: draggedColumn.dataset.slug,
       }),
     );
-    setTimeout(() => (draggedColumn.style.opacity = "0.4"), 0);
+    setTimeout(() => (draggedColumn!.style.opacity = "0.4"), 0);
   }
 
   function handleColumnDragEnd() {
@@ -401,12 +420,12 @@ export function initApp() {
     removeColumnDropIndicators();
   }
 
-  function handleColumnDragOver(e) {
+  function handleColumnDragOver(this: HTMLElement, e: DragEvent) {
     e.preventDefault();
     if (!draggedColumn) return;
     e.stopPropagation();
 
-    const target = this.closest(".column");
+    const target = this.closest(".column") as HTMLElement;
     if (!target || target === draggedColumn) return;
 
     const rect = this.getBoundingClientRect();
@@ -417,25 +436,25 @@ export function initApp() {
     const indicator = document.createElement("div");
     indicator.className = "column-drop-indicator";
 
-    if (e.clientX < midX) {
-      target.parentNode.insertBefore(indicator, target);
+    if (e.clientX! < midX) {
+      target.parentNode!.insertBefore(indicator, target);
     } else {
-      target.parentNode.insertBefore(indicator, target.nextSibling);
+      target.parentNode!.insertBefore(indicator, target.nextSibling);
     }
   }
 
-  function handleColumnDragEnter(e) {
+  function handleColumnDragEnter(e: DragEvent) {
     e.preventDefault();
   }
 
-  function handleColumnDragLeave(e) {
-    const target = this.closest(".column");
+  function handleColumnDragLeave(this: HTMLElement, e: DragEvent) {
+    const target = this.closest(".column") as HTMLElement;
     const rect = target.getBoundingClientRect();
     if (
-      e.clientX < rect.left ||
-      e.clientX > rect.right ||
-      e.clientY < rect.top ||
-      e.clientY > rect.bottom
+      e.clientX! < rect.left ||
+      e.clientX! > rect.right ||
+      e.clientY! < rect.top ||
+      e.clientY! > rect.bottom
     ) {
       removeColumnDropIndicators();
     }
@@ -447,23 +466,23 @@ export function initApp() {
       .forEach((el) => el.remove());
   }
 
-  async function handleColumnDrop(e) {
+  async function handleColumnDrop(this: HTMLElement, e: DragEvent) {
     e.preventDefault();
     e.stopPropagation();
     removeColumnDropIndicators();
 
     if (!draggedColumn) return;
 
-    const target = this.closest(".column");
+    const target = this.closest(".column") as HTMLElement;
     if (!target || target === draggedColumn) return;
 
-    const data = JSON.parse(e.dataTransfer.getData("text/plain"));
+    const data = JSON.parse(e.dataTransfer!.getData("text/plain"));
     if (data.type !== "column") return;
 
     const rect = target.getBoundingClientRect();
     const beforeSlug =
-      e.clientX < rect.left + rect.width / 2
-        ? target.dataset.slug
+      e.clientX! < rect.left + rect.width / 2
+        ? target.dataset.slug!
         : getNextColumnSlug(target) || "";
 
     try {
@@ -480,21 +499,21 @@ export function initApp() {
     }
   }
 
-  function getNextColumnSlug(target) {
-    const next = target.nextElementSibling;
+  function getNextColumnSlug(target: HTMLElement): string | null {
+    const next = target.nextElementSibling as HTMLElement | null;
     return next && next.dataset.slug ? next.dataset.slug : null;
   }
 
-  function openCreateCard(column) {
-    document.getElementById("dialog-title").textContent = "New Card";
-    document.getElementById("card-column").value = column;
-    document.getElementById("card-filename").value = "";
-    document.getElementById("card-title-input").value = "";
-    document.getElementById("card-content-input").value = "";
-    document.getElementById("card-priority-input").value = "";
-    document.getElementById("card-role-input").value = "";
-    document.getElementById("card-blocked-input").checked = false;
-    document.getElementById("card-categories-input").value = "";
+  function openCreateCard(column: string) {
+    (document.getElementById("dialog-title")!).textContent = "New Card";
+    (document.getElementById("card-column") as HTMLInputElement).value = column;
+    (document.getElementById("card-filename") as HTMLInputElement).value = "";
+    (document.getElementById("card-title-input") as HTMLInputElement).value = "";
+    contentInput.value = "";
+    (document.getElementById("card-priority-input") as HTMLInputElement).value = "";
+    (document.getElementById("card-role-input") as HTMLInputElement).value = "";
+    (document.getElementById("card-blocked-input") as HTMLInputElement).checked = false;
+    categoriesInput.value = "";
     clearCategories();
     currentColumn = column;
     currentFilename = "";
@@ -503,10 +522,10 @@ export function initApp() {
     commentInput.style.display = "none";
     showMarkdownPreview();
     cardDialog.showModal();
-    document.getElementById("card-title-input").focus();
+    (document.getElementById("card-title-input") as HTMLInputElement).focus();
   }
 
-  async function openEditCard(column, card) {
+  async function openEditCard(column: string, card: Card) {
     currentColumn = column;
     currentFilename = card.filename;
     addCommentBtn.style.display = "";
@@ -517,34 +536,34 @@ export function initApp() {
         card = await res.json();
       }
     } catch (_) {}
-    document.getElementById("dialog-title").textContent = "Edit Card";
-    document.getElementById("card-column").value = column;
-    document.getElementById("card-filename").value = card.filename;
-    document.getElementById("card-title-input").value = card.title;
-    document.getElementById("card-content-input").value = card.content;
-    document.getElementById("card-priority-input").value = card.priority || "";
-    document.getElementById("card-role-input").value = card.role || "";
-    document.getElementById("card-blocked-input").checked = !!card.blocked;
+    (document.getElementById("dialog-title")!).textContent = "Edit Card";
+    (document.getElementById("card-column") as HTMLInputElement).value = column;
+    (document.getElementById("card-filename") as HTMLInputElement).value = card.filename;
+    (document.getElementById("card-title-input") as HTMLInputElement).value = card.title;
+    contentInput.value = card.content || "";
+    (document.getElementById("card-priority-input") as HTMLInputElement).value = card.priority ? String(card.priority) : "";
+    (document.getElementById("card-role-input") as HTMLInputElement).value = card.role || "";
+    (document.getElementById("card-blocked-input") as HTMLInputElement).checked = !!card.blocked;
     setCategories(card.categories || []);
-    renderComments(card.comments);
+    renderComments(card.comments || []);
     showMarkdownPreview();
     cardDialog.showModal();
-    document.getElementById("card-title-input").focus();
+    (document.getElementById("card-title-input") as HTMLInputElement).focus();
   }
 
-  cardForm.addEventListener("submit", async (e) => {
+  cardForm.addEventListener("submit", async (e: SubmitEvent) => {
     e.preventDefault();
-    const column = document.getElementById("card-column").value;
-    const filename = document.getElementById("card-filename").value;
-    const title = document.getElementById("card-title-input").value;
-    const content = document.getElementById("card-content-input").value;
+    const column = (document.getElementById("card-column") as HTMLInputElement).value;
+    const filename = (document.getElementById("card-filename") as HTMLInputElement).value;
+    const title = (document.getElementById("card-title-input") as HTMLInputElement).value;
+    const content = contentInput.value;
     const categories = getCategories();
-    const priority = parseInt(document.getElementById("card-priority-input").value) || 0;
-    const role = document.getElementById("card-role-input").value.trim();
-    const blocked = document.getElementById("card-blocked-input").checked;
+    const priority = parseInt((document.getElementById("card-priority-input") as HTMLInputElement).value) || 0;
+    const role = (document.getElementById("card-role-input") as HTMLInputElement).value.trim();
+    const blocked = (document.getElementById("card-blocked-input") as HTMLInputElement).checked;
 
     try {
-      let res;
+      let res: Response;
       if (filename) {
         res = await fetch(`/api/card/${column}/${filename}`, {
           method: "PUT",
@@ -569,19 +588,19 @@ export function initApp() {
   });
 
   addCommentBtn.addEventListener("click", addComment);
-  commentInput.addEventListener("keydown", (e) => {
+  commentInput.addEventListener("keydown", (e: KeyboardEvent) => {
     if (e.key === "Enter") {
       e.preventDefault();
       addComment();
     }
   });
 
-  document.getElementById("cancel-btn").addEventListener("click", () => {
+  document.getElementById("cancel-btn")!.addEventListener("click", () => {
     cardDialog.close();
     clearCategories();
     showMarkdownPreview();
   });
-  cardDialog.addEventListener("click", (e) => {
+  cardDialog.addEventListener("click", (e: MouseEvent) => {
     if (e.target === cardDialog) {
       cardDialog.close();
       clearCategories();
@@ -589,7 +608,7 @@ export function initApp() {
     }
   });
 
-  async function deleteCard(column, filename) {
+  async function deleteCard(column: string, filename: string) {
     if (!confirm("Delete this card?")) return;
     try {
       const res = await fetch(`/api/card/${column}/${filename}`, {
@@ -602,22 +621,22 @@ export function initApp() {
     }
   }
 
-  document.getElementById("add-column-btn").addEventListener("click", () => {
-    document.getElementById("column-name-input").value = "";
+  document.getElementById("add-column-btn")!.addEventListener("click", () => {
+    (document.getElementById("column-name-input") as HTMLInputElement).value = "";
     columnDialog.showModal();
-    document.getElementById("column-name-input").focus();
+    (document.getElementById("column-name-input") as HTMLInputElement).focus();
   });
 
   document
-    .getElementById("column-cancel-btn")
+    .getElementById("column-cancel-btn")!
     .addEventListener("click", () => columnDialog.close());
-  columnDialog.addEventListener("click", (e) => {
+  columnDialog.addEventListener("click", (e: MouseEvent) => {
     if (e.target === columnDialog) columnDialog.close();
   });
 
-  columnForm.addEventListener("submit", async (e) => {
+  columnForm.addEventListener("submit", async (e: SubmitEvent) => {
     e.preventDefault();
-    const name = document.getElementById("column-name-input").value.trim();
+    const name = (document.getElementById("column-name-input") as HTMLInputElement).value.trim();
     if (!name) return;
 
     const slug = name
@@ -639,7 +658,7 @@ export function initApp() {
     }
   });
 
-  function renderComments(comments) {
+  function renderComments(comments: Comment[]) {
     commentsList.innerHTML = "";
     if (!comments || !comments.length) {
       const empty = document.createElement("p");
@@ -675,8 +694,8 @@ export function initApp() {
       commentInput.value = "";
       const cardRes = await fetch(`/api/card/${currentColumn}/${currentFilename}`);
       if (cardRes.ok) {
-        const card = await cardRes.json();
-        renderComments(card.comments);
+        const card = (await cardRes.json()) as Card;
+        renderComments(card.comments || []);
       }
     } catch (err) {
       console.error(err);
@@ -684,13 +703,13 @@ export function initApp() {
     }
   }
 
-  function escapeHtml(text) {
+  function escapeHtml(text: string): string {
     const div = document.createElement("div");
     div.textContent = text;
     return div.innerHTML;
   }
 
-  function formatDate(dateStr) {
+  function formatDate(dateStr: string): string {
     if (!dateStr) return "";
     const d = new Date(dateStr);
     return d.toLocaleDateString(undefined, {
@@ -700,8 +719,8 @@ export function initApp() {
     });
   }
 
-  function updateColumnCount(columnId) {
-    const colEl = document.querySelector(`.column[data-column="${columnId}"]`);
+  function updateColumnCount(columnId: string) {
+    const colEl = document.querySelector(`.column[data-column="${columnId}"]`) as HTMLElement | null;
     if (!colEl) return;
     const cards = colEl.querySelectorAll(".column-cards > .card");
     const countEl = colEl.querySelector(".column-count");
@@ -710,7 +729,7 @@ export function initApp() {
     }
   }
 
-  function animateCardMove(fromColumn, toColumn, card) {
+  function animateCardMove(fromColumn: string, toColumn: string, card: Card) {
     const srcContainer = document.querySelector(
       `.column-cards[data-column="${fromColumn}"]`,
     );
@@ -724,7 +743,7 @@ export function initApp() {
 
     const existing = srcContainer.querySelector(
       `.card[data-filename="${card.filename}"]`,
-    );
+    ) as HTMLElement | null;
     if (existing) {
       existing.style.transition = "opacity 0.2s";
       existing.style.opacity = "0";
@@ -732,54 +751,54 @@ export function initApp() {
         "transitionend",
         () => {
           existing.remove();
-          insertCardAnimated(dstContainer, card);
+          insertCardAnimated(dstContainer as HTMLElement, card);
           updateColumnCount(fromColumn);
           updateColumnCount(toColumn);
         },
         { once: true },
       );
     } else {
-      insertCardAnimated(dstContainer, card);
+      insertCardAnimated(dstContainer as HTMLElement, card);
       updateColumnCount(fromColumn);
       updateColumnCount(toColumn);
     }
   }
 
-  function animateCardCreated(column, card) {
+  function animateCardCreated(column: string, card: Card) {
     const container = document.querySelector(
       `.column-cards[data-column="${column}"]`,
     );
     if (!container) return;
-    insertCardAnimated(container, card);
+    insertCardAnimated(container as HTMLElement, card);
   }
 
-  function animateCardDeleted(column, filename) {
+  function animateCardDeleted(column: string, filename: string) {
     const container = document.querySelector(
       `.column-cards[data-column="${column}"]`,
     );
     if (!container) return;
-    const el = container.querySelector(`.card[data-filename="${filename}"]`);
+    const el = container.querySelector(`.card[data-filename="${filename}"]`) as HTMLElement | null;
     if (!el) return;
     el.style.transition = "opacity 0.2s";
     el.style.opacity = "0";
     el.addEventListener("transitionend", () => el.remove(), { once: true });
   }
 
-  function animateCardUpdated(column, card) {
+  function animateCardUpdated(column: string, card: Card) {
     const container = document.querySelector(
       `.column-cards[data-column="${column}"]`,
     );
     if (!container) return;
-    const el = container.querySelector(`.card[data-filename="${card.filename}"]`);
+    const el = container.querySelector(`.card[data-filename="${card.filename}"]`) as HTMLElement | null;
     if (!el) return;
-    el.querySelector(".card-title").textContent = card.title;
+    el.querySelector(".card-title")!.textContent = card.title;
     const updatedEl = el.querySelector(".text-xs.opacity-60");
     if (updatedEl) updatedEl.textContent = `Updated: ${formatDate(card.updated)}`;
 
-    const actions = el.querySelector(".card-actions");
+    const actions = el.querySelector(".card-actions")!;
 
-    let prioBadge = actions.querySelector(".badge-sm:not(.badge-outline)");
-    if (card.priority > 0) {
+    let prioBadge = actions.querySelector(".badge-sm:not(.badge-outline)") as HTMLElement | null;
+    if (card.priority! > 0) {
       if (prioBadge) {
         prioBadge.textContent = `P${card.priority}`;
         prioBadge.className = `badge badge-sm ${card.priority === 1 ? 'badge-error' : card.priority === 2 ? 'badge-warning' : 'badge-ghost'}`;
@@ -793,7 +812,7 @@ export function initApp() {
       prioBadge.remove();
     }
 
-    let roleBadge = actions.querySelector(".badge-outline");
+    let roleBadge = actions.querySelector(".badge-outline") as HTMLElement | null;
     if (card.role) {
       if (roleBadge) {
         roleBadge.textContent = card.role;
@@ -808,7 +827,7 @@ export function initApp() {
       roleBadge.remove();
     }
 
-    let blockedBadge = [...actions.querySelectorAll(".badge-error")].find(b => b.textContent === "blocked");
+    let blockedBadge = [...actions.querySelectorAll(".badge-error")].find(b => b.textContent === "blocked") as HTMLElement | undefined;
     if (card.blocked) {
       if (!blockedBadge) {
         blockedBadge = document.createElement("span");
@@ -816,10 +835,10 @@ export function initApp() {
         blockedBadge.textContent = "blocked";
         actions.insertBefore(blockedBadge, actions.firstChild);
       }
-      el.querySelector(".card-body").classList.add("opacity-60");
+      el.querySelector(".card-body")!.classList.add("opacity-60");
     } else {
       if (blockedBadge) blockedBadge.remove();
-      el.querySelector(".card-body").classList.remove("opacity-60");
+      el.querySelector(".card-body")!.classList.remove("opacity-60");
     }
 
     el.style.transition = "background 0.3s";
@@ -829,8 +848,8 @@ export function initApp() {
     }, 400);
   }
 
-  function insertCardAnimated(container, card) {
-    const el = createCardElement(card, container.dataset.column);
+  function insertCardAnimated(container: HTMLElement, card: Card) {
+    const el = createCardElement(card, container.dataset.column!);
     el.style.opacity = "0";
     el.style.transition = "opacity 0.2s";
     container.appendChild(el);
