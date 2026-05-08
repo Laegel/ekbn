@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ekbn - Embedded Kanban</title>
+    <meta http-equiv="Cache-control" content="No-Cache">
+</head>
+<body>
+    <header class="flex items-center justify-between p-4 bg-base-200 border-b border-base-300">
+        <h1 class="text-2xl font-bold text-primary">ekbn</h1>
+        <button id="add-column-btn" class="btn btn-primary btn-sm">+ Column</button>
+    </header>
+    <main id="board" class="flex gap-4 p-4 overflow-x-auto items-start"></main>
+
+    <dialog id="card-dialog" class="modal">
+        <div class="modal-box">
+            <form id="card-form">
+                <h2 id="dialog-title" class="text-lg font-bold mb-4">New Card</h2>
+                <input type="hidden" id="card-column">
+                <input type="hidden" id="card-filename">
+                <div class="form-control mb-3">
+                    <label class="label">
+                        <span class="label-text">Title</span>
+                    </label>
+                    <input type="text" id="card-title-input" class="input input-bordered w-full" required>
+                </div>
+                <div class="form-control mb-3">
+                    <label class="label">
+                        <span class="label-text">Priority (1 = highest)</span>
+                    </label>
+                    <input type="number" id="card-priority-input" class="input input-bordered w-full" min="0" placeholder="0 (no priority)">
+                </div>
+                <div class="form-control mb-3">
+                    <label class="label">
+                        <span class="label-text">Role</span>
+                    </label>
+                    <input type="text" id="card-role-input" class="input input-bordered w-full" list="role-suggestions" placeholder="e.g. dev, design, pm">
+                    <datalist id="role-suggestions">
+                        <option value="dev">
+                        <option value="design">
+                        <option value="pm">
+                        <option value="qa">
+                        <option value="docs">
+                        <option value="ops">
+                    </datalist>
+                </div>
+                <div class="form-control mb-3">
+                    <label class="label cursor-pointer justify-start gap-2">
+                        <input type="checkbox" id="card-blocked-input" class="checkbox checkbox-error">
+                        <span class="label-text">Blocked</span>
+                    </label>
+                </div>
+                <div class="form-control mb-3">
+                    <label class="label">
+                        <span class="label-text">Content (Markdown)</span>
+                    </label>
+                    <div id="md-editor" class="md-editor">
+                        <textarea id="card-content-input" rows="8" class="textarea textarea-bordered w-full" placeholder="Write Markdown here..."></textarea>
+                    </div>
+                </div>
+                <div class="form-control mb-4">
+                    <label class="label">
+                        <span class="label-text">Categories</span>
+                    </label>
+                    <div id="categories-container" class="categories-container">
+                        <div id="categories-list" class="categories-list flex flex-wrap gap-1"></div>
+                        <input type="text" id="card-categories-input" class="input input-bordered w-full" placeholder="Type and press comma...">
+                    </div>
+                </div>
+                <div class="form-control mb-4">
+                    <label class="label">
+                        <span class="label-text">Comments</span>
+                    </label>
+                    <div id="comments-list" class="comments-list space-y-2 mb-2 max-h-48 overflow-y-auto"></div>
+                    <div class="flex gap-2">
+                        <input type="text" id="card-comment-input" class="input input-bordered flex-1" placeholder="Add a comment...">
+                        <button type="button" id="add-comment-btn" class="btn btn-primary btn-sm">Add</button>
+                    </div>
+                </div>
+                <div class="modal-action">
+                    <button type="button" id="cancel-btn" class="btn">Cancel</button>
+                    <button type="submit" id="save-btn" class="btn btn-primary">Save</button>
+                </div>
+            </form>
+        </div>
+        <form method="dialog" class="modal-backdrop"></form>
+    </dialog>
+
+    <dialog id="column-dialog" class="modal">
+        <div class="modal-box">
+            <form id="column-form">
+                <h2 class="text-lg font-bold mb-4">New Column</h2>
+                <div class="form-control mb-4">
+                    <label class="label">
+                        <span class="label-text">Name</span>
+                    </label>
+                    <input type="text" id="column-name-input" class="input input-bordered w-full" required>
+                </div>
+                <div class="modal-action">
+                    <button type="button" id="column-cancel-btn" class="btn">Cancel</button>
+                    <button type="submit" id="column-save-btn" class="btn btn-primary">Create</button>
+                </div>
+            </form>
+        </div>
+        <form method="dialog" class="modal-backdrop"></form>
+    </dialog>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>

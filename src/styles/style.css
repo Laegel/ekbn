@@ -1,0 +1,33 @@
+@import "tailwindcss";
+@plugin "daisyui";
+
+/* Custom styles for kanban - minimal, using DaisyUI classes in HTML/JS */
+.card.dragging {
+  opacity: 0.5;
+}
+
+.column-cards.drag-over {
+  background: var(--fallback-bc, oklch(var(--bc) / 0.1));
+  border-radius: var(--radius-box, 1rem);
+}
+
+.column-drop-indicator {
+  width: 4px;
+  background: var(--color-primary, #3b82f6);
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.md-preview {
+  min-height: 200px;
+  cursor: text;
+}
+
+.md-preview.empty {
+  font-style: italic;
+  opacity: 0.6;
+}
+
+#board {
+  min-height: calc(100vh - 80px);
+}

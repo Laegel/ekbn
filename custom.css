@@ -1,0 +1,33 @@
+@layer base {
+  :root:has(input.theme-controller[value="light"]:checked), [data-theme="light"] {
+    color-scheme: light;
+    --color-base-100: oklch(96% 0.016 293.756);
+    --color-base-200: oklch(94% 0.029 294.588);
+    --color-base-300: oklch(89% 0.057 293.283);
+    --color-base-content: oklch(38% 0.189 293.745);
+    --color-primary: oklch(75% 0.183 55.934);
+    --color-primary-content: oklch(26% 0.079 36.259);
+    --color-secondary: oklch(84% 0.238 128.85);
+    --color-secondary-content: oklch(27% 0.072 132.109);
+    --color-accent: oklch(71% 0.203 305.504);
+    --color-accent-content: oklch(29% 0.149 302.717);
+    --color-neutral: oklch(38% 0.189 293.745);
+    --color-neutral-content: oklch(96% 0.016 293.756);
+    --color-info: oklch(78% 0.154 211.53);
+    --color-info-content: oklch(30% 0.056 229.695);
+    --color-success: oklch(79% 0.209 151.711);
+    --color-success-content: oklch(26% 0.065 152.934);
+    --color-warning: oklch(85% 0.199 91.936);
+    --color-warning-content: oklch(28% 0.066 53.813);
+    --color-error: oklch(70% 0.191 22.216);
+    --color-error-content: oklch(25% 0.092 26.042);
+    --radius-selector: 0rem;
+    --radius-field: 1rem;
+    --radius-box: 1rem;
+    --size-selector: 0.25rem;
+    --size-field: 0.25rem;
+    --border: 1px;
+    --depth: 0;
+    --noise: 1;
+  }
+}
