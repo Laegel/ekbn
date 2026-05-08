@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,9 @@ import (
 	"gopkg.in/yaml.v3"
 	"ekbn/model"
 )
+
+//go:embed dist/*
+var distFS embed.FS
 
 type Config struct {
 	Theme      string `yaml:"theme"`
@@ -201,7 +205,7 @@ func ensureColumns() {
 }
 
 func staticServer(theme string) http.Handler {
-	fsys := http.FileServer(http.Dir("dist"))
+	fsys := http.FileServer(http.FS(distFS))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			serveIndexWithTheme(w, r, theme)
@@ -212,7 +216,7 @@ func staticServer(theme string) http.Handler {
 }
 
 func serveIndexWithTheme(w http.ResponseWriter, r *http.Request, theme string) {
-	data, err := os.ReadFile(filepath.Join("dist", "index.html"))
+	data, err := distFS.ReadFile("dist/index.html")
 	if err != nil {
 		http.NotFound(w, r)
 		return
