@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -205,7 +206,8 @@ func ensureColumns() {
 }
 
 func staticServer(theme string) http.Handler {
-	fsys := http.FileServer(http.FS(distFS))
+	sub, _ := fs.Sub(distFS, "dist")
+	fsys := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			serveIndexWithTheme(w, r, theme)
