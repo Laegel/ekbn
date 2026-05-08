@@ -10,6 +10,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,3 +24,22 @@ jobs:
           go-version: "1.22"
       - run: npm ci
       - run: npm run dist
+
+      - name: Rename binary for Windows
+        if: runner.os == 'Windows'
+        run: |
+          if [ -f ekbn ] && [ ! -f ekbn.exe ]; then
+            mv ekbn ekbn.exe
+          fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ekbn-${{ runner.os }}-binary
+          path: ekbn*
+
+      - name: Upload frontend assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ekbn-${{ runner.os }}-dist
+          path: dist/
