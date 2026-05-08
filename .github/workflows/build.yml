@@ -19,6 +19,12 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      - name: Upload frontend assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
   cross-build:
     needs: build
     strategy:
@@ -27,24 +33,45 @@ jobs:
           - goos: linux
             goarch: amd64
             ext: ""
+            archive: tar.gz
           - goos: darwin
             goarch: amd64
             ext: ""
+            archive: tar.gz
           - goos: windows
             goarch: amd64
             ext: ".exe"
+            archive: zip
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+
+      - name: Download frontend assets
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
       - name: Cross-compile binary
         run: |
           GOOS=${{ matrix.target.goos }} GOARCH=${{ matrix.target.goarch }} \
             go build -o ekbn-${{ matrix.target.goos }}${{ matrix.target.ext }}
-      - name: Upload binary
+
+      - name: Package archive
+        run: |
+          BINARY=ekbn-${{ matrix.target.goos }}${{ matrix.target.ext }}
+          ARCHIVE=ekbn-${{ matrix.target.goos }}.${{ matrix.target.archive }}
+          if [ "${{ matrix.target.archive }}" = "zip" ]; then
+            zip -r "$ARCHIVE" "$BINARY" dist/
+          else
+            tar czf "$ARCHIVE" "$BINARY" dist/
+          fi
+
+      - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
-          name: ekbn-${{ matrix.target.goos }}-binary
-          path: ekbn-${{ matrix.target.goos }}${{ matrix.target.ext }}
+          name: ekbn-${{ matrix.target.goos }}
+          path: ekbn-${{ matrix.target.goos }}.${{ matrix.target.archive }}
