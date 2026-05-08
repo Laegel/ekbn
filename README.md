@@ -1,6 +1,6 @@
 # ekbn - Embedded Kanban
 
-[screenshot.png](screenshot.png)
+![Screenshot](screenshot.png)
 
 A lightweight local tool for project management.
 You can edit the cards with your favorite text editor or open the web application
