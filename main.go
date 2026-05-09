@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -17,6 +18,16 @@ import (
 	"gopkg.in/yaml.v3"
 	"ekbn/model"
 )
+
+var distFSRoot fs.FS
+
+func init() {
+	var err error
+	distFSRoot, err = fs.Sub(distFS, "dist")
+	if err != nil {
+		log.Fatalf("failed to access embedded dist: %v", err)
+	}
+}
 
 //go:embed dist
 var distFS embed.FS
@@ -205,7 +216,7 @@ func ensureColumns() {
 }
 
 func staticServer(theme string) http.Handler {
-	fsys := http.FileServer(http.FS(distFS))
+	fsys := http.FileServer(http.FS(distFSRoot))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			serveIndexWithTheme(w, r, theme)
@@ -216,7 +227,7 @@ func staticServer(theme string) http.Handler {
 }
 
 func serveIndexWithTheme(w http.ResponseWriter, r *http.Request, theme string) {
-	data, err := distFS.ReadFile("index.html")
+	data, err := fs.ReadFile(distFSRoot, "index.html")
 	if err != nil {
 		http.NotFound(w, r)
 		return
