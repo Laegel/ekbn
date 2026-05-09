@@ -12,6 +12,16 @@ Each folder represents a column.
 1 server app reading and writing files, written in Go.
 1 front-end app, written in JS with DaisyUI.
 
+It's all bundled in the binary so you don't have anything to install or build.
+You can find the binaries (Linux, Windows, macOS) in the Actions tab, in the merge PR workflows.
+
+Requirement: 
+- File watcher: check https://github.com/fsnotify/fsnotify for platform support.
+
+## Run
+
+Once you have the binary, you can run it like any other binary. Careful, if no port is specified (as an environment variable or a config) then a random port is picked: it's convenient but when running the app from a GUI, the process will remain active unless you explicitely kill it.
+
 ## Server & UI Capabilities
 
 - Create card
@@ -20,6 +30,8 @@ Each folder represents a column.
 - Delete card
 - Create column
 - Move column
+
+There's a file watcher that notifies the front-end whenever a card file is modified. The event is pushed via SSE in order to sync the state.
 
 ## Customization
 
