@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 	"testing"
+
+	"ekbn/internal/serve"
 )
 
 func saveRestoreConfig(t *testing.T) {
@@ -28,7 +30,7 @@ func writeConfig(t *testing.T, content string) {
 func TestLoadConfigDefaults(t *testing.T) {
 	saveRestoreConfig(t)
 	os.Remove("config.yml")
-	cfg := loadConfig()
+	cfg := serve.LoadConfig()
 	if cfg.Theme != "dark" {
 		t.Errorf("Theme = %q, want %q", cfg.Theme, "dark")
 	}
@@ -43,7 +45,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 func TestLoadConfigFull(t *testing.T) {
 	saveRestoreConfig(t)
 	writeConfig(t, "theme: light\nfolder-name: .kanban\nport: 8080\n")
-	cfg := loadConfig()
+	cfg := serve.LoadConfig()
 	if cfg.Theme != "light" {
 		t.Errorf("Theme = %q, want %q", cfg.Theme, "light")
 	}
@@ -58,7 +60,7 @@ func TestLoadConfigFull(t *testing.T) {
 func TestLoadConfigPartial(t *testing.T) {
 	saveRestoreConfig(t)
 	writeConfig(t, "theme: synthwave\n")
-	cfg := loadConfig()
+	cfg := serve.LoadConfig()
 	if cfg.Theme != "synthwave" {
 		t.Errorf("Theme = %q, want %q", cfg.Theme, "synthwave")
 	}
@@ -73,7 +75,7 @@ func TestLoadConfigPartial(t *testing.T) {
 func TestLoadConfigMalformedYAML(t *testing.T) {
 	saveRestoreConfig(t)
 	writeConfig(t, "theme: light\n: broken yaml\n")
-	cfg := loadConfig()
+	cfg := serve.LoadConfig()
 	if cfg.Theme != "dark" {
 		t.Errorf("Theme = %q, want default %q", cfg.Theme, "dark")
 	}
@@ -82,7 +84,7 @@ func TestLoadConfigMalformedYAML(t *testing.T) {
 func TestLoadConfigPortOnly(t *testing.T) {
 	saveRestoreConfig(t)
 	writeConfig(t, "port: 9999\n")
-	cfg := loadConfig()
+	cfg := serve.LoadConfig()
 	if cfg.Port != 9999 {
 		t.Errorf("Port = %d, want 9999", cfg.Port)
 	}
