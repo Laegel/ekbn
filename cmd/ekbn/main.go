@@ -16,7 +16,7 @@ func main() {
 		runServe()
 	case "mcp":
 		runMCP()
-	case "-h", "--help":
+	case "help", "-h", "--help":
 		printUsage()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
