@@ -20,7 +20,7 @@ Requirement:
 
 ## Run
 
-Once you have the binary, you can run it like any other binary. Careful, if no port is specified (as an environment variable or a config) then a random port is picked: it's convenient but when running the app from a GUI, the process will remain active unless you explicitely kill it.
+The binary comes with a `serve` command. Careful, if no port is specified (as an environment variable or a config) then a random port is picked: it's convenient but when running the app from a GUI, the process will remain active unless you explicitely kill it.
 
 ## Server & UI Capabilities
 
@@ -32,6 +32,10 @@ Once you have the binary, you can run it like any other binary. Careful, if no p
 - Move column
 
 There's a file watcher that notifies the front-end whenever a card file is modified. The event is pushed via SSE in order to sync the state.
+
+## MCP Support
+
+Your favorite agent is able to interact with this app via MCP. To run the app with MCP support, use the `mcp` command.
 
 ## Customization
 
