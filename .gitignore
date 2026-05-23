@@ -1,6 +1,6 @@
 dist/
 node_modules/
-columns/
+.kanban/
 /ekbn
 /plan
 /orchestrator

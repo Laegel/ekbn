@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"ekbn/internal/opencode"
+	"ekbn/internal/serve"
 )
 
 type mcpConfig struct {
@@ -31,11 +32,12 @@ type opencodeConfig struct {
 const (
 	pollInterval = 300
 	maxRetries   = 4
-	kanbanRoot   = ".kanban"
-	logFile      = ".kanban/orchestrator.log"
 	agentsMD     = "AGENTS.md"
 	securityMD   = "SECURITY.md"
 )
+
+var kanbanRoot string
+var logFile string
 
 var folderPattern = regexp.MustCompile(`^\d{3}-(.+)$`)
 
@@ -65,7 +67,7 @@ func (l *logger) info(format string, args ...any)  { l.log("INFO", format, args.
 func (l *logger) warn(format string, args ...any)  { l.log("WARNING", format, args...) }
 func (l *logger) error(format string, args ...any) { l.log("ERROR", format, args...) }
 
-var log = newLogger(logFile)
+var log *logger
 
 func findKanbanDir(slug string) string {
 	root := filepath.Join(".", kanbanRoot)
@@ -420,7 +422,22 @@ func killProc(cmd *exec.Cmd) {
 	}
 }
 
+func resolveKanbanRoot() string {
+	if dir := os.Getenv("EKB_COLUMNS"); dir != "" {
+		return dir
+	}
+	cfg := serve.LoadConfig()
+	if cfg.FolderName != "" {
+		return cfg.FolderName
+	}
+	return ".kanban"
+}
+
 func main() {
+	kanbanRoot = resolveKanbanRoot()
+	logFile = kanbanRoot + "/orchestrator.log"
+	log = newLogger(logFile)
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	shutdown := false

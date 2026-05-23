@@ -117,9 +117,10 @@ func TestFindKanbanDir(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(origWd)
 
-	os.MkdirAll(".kanban", 0755)
-	os.MkdirAll(".kanban/100-todo", 0755)
-	os.MkdirAll(".kanban/200-in-progress", 0755)
+	kanbanRoot = ".kanban"
+	os.MkdirAll(kanbanRoot, 0755)
+	os.MkdirAll(filepath.Join(kanbanRoot, "100-todo"), 0755)
+	os.MkdirAll(filepath.Join(kanbanRoot, "200-in-progress"), 0755)
 
 	t.Run("found", func(t *testing.T) {
 		got := findKanbanDir("todo")
@@ -139,7 +140,7 @@ func TestFindKanbanDir(t *testing.T) {
 	})
 
 	t.Run("no root", func(t *testing.T) {
-		os.RemoveAll(".kanban")
+		os.RemoveAll(kanbanRoot)
 		got := findKanbanDir("todo")
 		if got != "" {
 			t.Errorf("findKanbanDir('todo') without root = %q, want empty", got)
@@ -153,7 +154,8 @@ func TestHasActiveTickets(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(origWd)
 
-	os.MkdirAll(".kanban/100-todo", 0755)
+	kanbanRoot = ".kanban"
+	os.MkdirAll(filepath.Join(kanbanRoot, "100-todo"), 0755)
 
 	t.Run("no tickets", func(t *testing.T) {
 		if hasActiveTickets() {
@@ -162,17 +164,17 @@ func TestHasActiveTickets(t *testing.T) {
 	})
 
 	t.Run("ticket in in-progress", func(t *testing.T) {
-		os.MkdirAll(".kanban/200-in-progress", 0755)
-		os.WriteFile(".kanban/200-in-progress/test.md", []byte("---\ntitle: Active\n---\n"), 0644)
+		os.MkdirAll(filepath.Join(kanbanRoot, "200-in-progress"), 0755)
+		os.WriteFile(filepath.Join(kanbanRoot, "200-in-progress/test.md"), []byte("---\ntitle: Active\n---\n"), 0644)
 		if !hasActiveTickets() {
 			t.Error("hasActiveTickets() = false, want true (ticket in in-progress)")
 		}
-		os.RemoveAll(".kanban/200-in-progress")
+		os.RemoveAll(filepath.Join(kanbanRoot, "200-in-progress"))
 	})
 
 	t.Run("ticket in review", func(t *testing.T) {
-		os.MkdirAll(".kanban/300-review", 0755)
-		os.WriteFile(".kanban/300-review/test.md", []byte("---\ntitle: Review\n---\n"), 0644)
+		os.MkdirAll(filepath.Join(kanbanRoot, "300-review"), 0755)
+		os.WriteFile(filepath.Join(kanbanRoot, "300-review/test.md"), []byte("---\ntitle: Review\n---\n"), 0644)
 		if !hasActiveTickets() {
 			t.Error("hasActiveTickets() = false, want true (ticket in review)")
 		}
@@ -185,7 +187,8 @@ func TestPickTicket(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(origWd)
 
-	os.MkdirAll(".kanban/100-todo", 0755)
+	kanbanRoot = ".kanban"
+	os.MkdirAll(filepath.Join(kanbanRoot, "100-todo"), 0755)
 
 	t.Run("no tickets", func(t *testing.T) {
 		if ticket := pickTicket(); ticket != "" {
@@ -194,11 +197,11 @@ func TestPickTicket(t *testing.T) {
 	})
 
 	t.Run("picks by priority", func(t *testing.T) {
-		mustWrite(t, ".kanban/100-todo/low.md", "---\ntitle: Low\npriority: low\n---\n")
+		mustWrite(t, filepath.Join(kanbanRoot, "100-todo", "low.md"), "---\ntitle: Low\npriority: low\n---\n")
 		time.Sleep(10 * time.Millisecond)
-		mustWrite(t, ".kanban/100-todo/high.md", "---\ntitle: High\npriority: high\n---\n")
+		mustWrite(t, filepath.Join(kanbanRoot, "100-todo", "high.md"), "---\ntitle: High\npriority: high\n---\n")
 		time.Sleep(10 * time.Millisecond)
-		mustWrite(t, ".kanban/100-todo/medium.md", "---\ntitle: Medium\npriority: medium\n---\n")
+		mustWrite(t, filepath.Join(kanbanRoot, "100-todo", "medium.md"), "---\ntitle: Medium\npriority: medium\n---\n")
 
 		ticket := pickTicket()
 		if ticket == "" {
