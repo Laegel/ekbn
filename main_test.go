@@ -9,27 +9,27 @@ import (
 
 func saveRestoreConfig(t *testing.T) {
 	t.Helper()
-	orig, err := os.ReadFile("config.yml")
+	orig, err := os.ReadFile("ekbn.config.yml")
 	hasOrig := err == nil
 	t.Cleanup(func() {
 		if hasOrig {
-			os.WriteFile("config.yml", orig, 0644)
+			os.WriteFile("ekbn.config.yml", orig, 0644)
 		} else {
-			os.Remove("config.yml")
+			os.Remove("ekbn.config.yml")
 		}
 	})
 }
 
 func writeConfig(t *testing.T, content string) {
 	t.Helper()
-	if err := os.WriteFile("config.yml", []byte(content), 0644); err != nil {
+	if err := os.WriteFile("ekbn.config.yml", []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestLoadConfigDefaults(t *testing.T) {
 	saveRestoreConfig(t)
-	os.Remove("config.yml")
+	os.Remove("ekbn.config.yml")
 	cfg := serve.LoadConfig()
 	if cfg.Theme != "dark" {
 		t.Errorf("Theme = %q, want %q", cfg.Theme, "dark")

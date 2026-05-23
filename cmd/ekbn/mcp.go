@@ -5,15 +5,17 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"ekbn/internal/serve"
 	"ekbn/mcp"
 )
 
 func runMCP() {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
-	columnsDir := fs.String("columns", "", "Path to the columns directory (default: $EKB_COLUMNS or './columns')")
+	columnsDir := fs.String("columns", "", "Path to the columns directory (default: $EKB_COLUMNS, then ekbn.config.yml folder-name, then './columns')")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: ekbn mcp [options]\n\nOptions:\n")
 		fs.PrintDefaults()
@@ -25,12 +27,18 @@ func runMCP() {
 		dir = os.Getenv("EKB_COLUMNS")
 	}
 	if dir == "" {
+		cfg := serve.LoadConfig()
+		if cfg.FolderName != "" {
+			dir, _ = filepath.Abs(cfg.FolderName)
+		}
+	}
+	if dir == "" {
 		var err error
 		dir, err = os.Getwd()
 		if err != nil {
 			log.Fatalf("failed to get working directory: %v", err)
 		}
-		dir = dir + "/columns"
+		dir = filepath.Join(dir, "columns")
 	}
 
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {

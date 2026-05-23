@@ -23,17 +23,31 @@ type Config struct {
 	Theme      string `yaml:"theme"`
 	FolderName string `yaml:"folder-name"`
 	Port       int    `yaml:"port"`
+	Prompt     string `yaml:"prompt"`
+}
+
+func configPath() string {
+	for _, name := range []string{"ekbn.config.yml", "ekbn.config.yaml"} {
+		if _, err := os.Stat(name); err == nil {
+			return name
+		}
+	}
+	return ""
 }
 
 func LoadConfig() Config {
 	cfg := Config{Theme: "dark", FolderName: "columns", Port: 0}
-	data, err := os.ReadFile("config.yml")
+	path := configPath()
+	if path == "" {
+		return cfg
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return cfg
 	}
 	var parsed Config
 	if err := yaml.Unmarshal(data, &parsed); err != nil {
-		log.Printf("config.yml: %v, using defaults", err)
+		log.Printf("%s: %v, using defaults", path, err)
 		return cfg
 	}
 	if parsed.Theme != "" {
@@ -44,6 +58,9 @@ func LoadConfig() Config {
 	}
 	if parsed.Port > 0 {
 		cfg.Port = parsed.Port
+	}
+	if parsed.Prompt != "" {
+		cfg.Prompt = parsed.Prompt
 	}
 	return cfg
 }
