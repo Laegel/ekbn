@@ -665,6 +665,9 @@ func handleColumn(broker *eventBroker, watcher *folderWatcher) http.HandlerFunc 
 }
 
 func Run(distFS fs.FS) {
+	if _, err := fs.Stat(distFS, "index.html"); err != nil {
+		log.Fatalf("UI assets not found: %v. Build the frontend with 'npm run build' or use --dev if running locally", err)
+	}
 	cfg := LoadConfig()
 	columnsDir = getColumnsDir(cfg.FolderName)
 	ensureColumns(columnsDir)

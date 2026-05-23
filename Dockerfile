@@ -11,7 +11,7 @@ RUN npm ci
 
 COPY . .
 RUN npm run build && \
-    CGO_ENABLED=0 go build -o /ekbn        ./cmd/ekbn && \
+    CGO_ENABLED=0 go build -o /ekbn        . && \
     CGO_ENABLED=0 go build -o /orchestrator ./cmd/orchestrator && \
     CGO_ENABLED=0 go build -o /plan        ./cmd/plan
 
