@@ -39,7 +39,7 @@ Your favorite agent is able to interact with this app via MCP. To run the app wi
 
 ## Customization
 
-You can create a `config.yml` file next to the binary and set the following properties:
+You can create an `ekbn.config.yml` (or `ekbn.config.yaml`) file next to the binary and set the following properties:
 
 ```yml
 theme: dark

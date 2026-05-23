@@ -1,0 +1,17 @@
+theme: dark
+folder-name: columns
+port: 8089
+prompt: |
+  Available tools: list_columns, create_card
+
+  Read the spec file, then:
+  1. Call list_columns to discover the available columns
+  2. Break the spec into 2-8 tickets, ordered by dependency
+  3. For each ticket, call create_card with:
+      - column: <the column ID from step 1>
+      - title: <3-8 word title>
+      - content: <2-5 sentences describing the work and what "done" means>
+      - priority: <0|1|2|3> (0=foundational, 1=high, 2=medium, 3=low)
+
+  Do NOT create tickets for testing, docs, or CI unless the spec requires them.
+  Do NOT read or modify files.
