@@ -23,7 +23,6 @@ COPY --from=builder /ekbn        /usr/local/bin/ekbn
 COPY --from=builder /orchestrator /usr/local/bin/orchestrator
 COPY --from=builder /plan        /usr/local/bin/plan
 COPY ekbn.config.yml custom.css /workspace/
-COPY columns /workspace/columns
 
 WORKDIR /workspace
 

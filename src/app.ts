@@ -87,34 +87,71 @@ export function initApp() {
     }
   });
 
-  const es = new EventSource("/api/events");
+  let ws: WebSocket | null = null;
+  let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  es.addEventListener("card-created", (e: MessageEvent) => {
-    if (localMoveInProgress) return;
-    const data = JSON.parse(e.data) as { column: string; card: Card };
-    animateCardCreated(data.column, data.card);
-    updateColumnCount(data.column);
-  });
-  es.addEventListener("card-deleted", (e: MessageEvent) => {
-    if (localMoveInProgress) return;
-    const data = JSON.parse(e.data) as { column: string; filename: string };
-    animateCardDeleted(data.column, data.filename);
-    updateColumnCount(data.column);
-  });
-  es.addEventListener("card-updated", (e: MessageEvent) => {
-    if (localMoveInProgress) return;
-    const data = JSON.parse(e.data) as { column: string; card: Card };
-    animateCardUpdated(data.column, data.card);
-  });
-  es.addEventListener("card-moved", (e: MessageEvent) => {
-    if (localMoveInProgress) return;
-    const data = JSON.parse(e.data) as { fromColumn: string; toColumn: string; card: Card };
-    animateCardMove(data.fromColumn, data.toColumn, data.card);
-  });
-  es.addEventListener("column-reordered", () => {
-    if (localMoveInProgress) return;
-    loadBoard();
-  });
+  function connectWS() {
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+    if (ws) {
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      ws.close();
+    }
+
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/api/events`);
+
+    ws.onmessage = (e: MessageEvent) => {
+      if (localMoveInProgress) return;
+      try {
+        const payload = JSON.parse(e.data) as Record<string, unknown>;
+        switch (payload.type) {
+          case "card-created": {
+            const d = payload as unknown as { column: string; card: Card };
+            animateCardCreated(d.column, d.card);
+            updateColumnCount(d.column);
+            break;
+          }
+          case "card-deleted": {
+            const d = payload as unknown as { column: string; filename: string };
+            animateCardDeleted(d.column, d.filename);
+            updateColumnCount(d.column);
+            break;
+          }
+          case "card-updated": {
+            const d = payload as unknown as { column: string; card: Card };
+            animateCardUpdated(d.column, d.card);
+            break;
+          }
+          case "card-moved": {
+            const d = payload as unknown as { fromColumn: string; toColumn: string; card: Card };
+            animateCardMove(d.fromColumn, d.toColumn, d.card);
+            break;
+          }
+          case "column-reordered":
+            loadBoard();
+            break;
+        }
+      } catch (err) {
+        console.error("WS message error:", err);
+      }
+    };
+
+    ws.onclose = () => {
+      ws = null;
+      wsReconnectTimer = setTimeout(connectWS, 3000);
+    };
+
+    ws.onerror = () => {
+      ws?.close();
+    };
+  }
+
+  connectWS();
 
   categoriesInput.addEventListener("keydown", (e: KeyboardEvent) => {
     if (e.key === ",") {

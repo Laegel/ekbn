@@ -11,15 +11,12 @@ export default defineConfig({
     tailwindcss(),
   ],
   server: {
-    port: 3000,
+    port: 3002,
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: 'http://localhost:8089',
         changeOrigin: true,
-      },
-      '/events': {
-        target: 'http://localhost:8080',
-        changeOrigin: true,
+        ws: true,
       },
     },
     watch: {

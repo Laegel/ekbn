@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/gorilla/websocket"
 	"gopkg.in/yaml.v3"
 
 	"ekbn/model"
@@ -110,73 +111,98 @@ func ensureColumns(columnsDir string) {
 	}
 }
 
+type wsClient struct {
+	conn *websocket.Conn
+	send chan []byte
+}
+
 type eventBroker struct {
 	mu      sync.RWMutex
-	clients map[chan string]bool
+	clients map[*wsClient]bool
 }
 
 func newEventBroker() *eventBroker {
 	return &eventBroker{
-		clients: make(map[chan string]bool),
+		clients: make(map[*wsClient]bool),
 	}
 }
 
-func (b *eventBroker) register(ch chan string) {
+func (b *eventBroker) register(client *wsClient) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.clients[ch] = true
+	b.clients[client] = true
 }
 
-func (b *eventBroker) unregister(ch chan string) {
+func (b *eventBroker) unregister(client *wsClient) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	delete(b.clients, ch)
-	close(ch)
+	if _, ok := b.clients[client]; ok {
+		delete(b.clients, client)
+		close(client.send)
+	}
 }
 
 func (b *eventBroker) broadcast(event string) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	for ch := range b.clients {
+	for client := range b.clients {
 		select {
-		case ch <- event:
+		case client.send <- []byte(event):
 		default:
+			log.Printf("WebSocket client send buffer full, dropping message")
 		}
 	}
 }
 
+var wsUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
 func (b *eventBroker) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		conn, err := wsUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("WebSocket upgrade error: %v", err)
 			return
 		}
 
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		client := &wsClient{
+			conn: conn,
+			send: make(chan []byte, 16),
+		}
+		b.register(client)
 
-		ch := make(chan string, 16)
-		b.register(ch)
-		defer b.unregister(ch)
+		go b.writePump(client)
+		b.readPump(client)
+	}
+}
 
-		ctx := r.Context()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case event := <-ch:
-				var payload map[string]interface{}
-				if err := json.Unmarshal([]byte(event), &payload); err == nil {
-					if eventType, ok := payload["type"].(string); ok {
-						fmt.Fprintf(w, "event: %s\n", eventType)
-					}
-				}
-				fmt.Fprintf(w, "data: %s\n\n", event)
-				flusher.Flush()
-			}
+func (b *eventBroker) readPump(client *wsClient) {
+	defer func() {
+		b.unregister(client)
+		client.conn.Close()
+	}()
+
+	client.conn.SetReadLimit(512)
+	client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	client.conn.SetPongHandler(func(string) error {
+		client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	for {
+		if _, _, err := client.conn.ReadMessage(); err != nil {
+			break
+		}
+	}
+}
+
+func (b *eventBroker) writePump(client *wsClient) {
+	defer client.conn.Close()
+
+	for msg := range client.send {
+		if err := client.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+			return
 		}
 	}
 }

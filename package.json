@@ -4,13 +4,15 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently 'go run main.go serve' 'vite'",
     "build": "vite build",
     "dist": "vite build && go build -o ekbn .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "go test ./..."
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.4",
+    "concurrently": "^10.0.3",
     "daisyui": "^5.5.19",
     "tailwindcss": "^4.2.4",
     "typescript": "^5.7.0",

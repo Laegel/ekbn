@@ -13,6 +13,28 @@ import (
 	"ekbn/model"
 )
 
+func extractArg(args map[string]any, key string) (string, error) {
+	v, ok := args[key]
+	if !ok {
+		return "", fmt.Errorf("missing required argument %q", key)
+	}
+	switch val := v.(type) {
+	case string:
+		return val, nil
+	case []string:
+		if len(val) > 0 {
+			return val[0], nil
+		}
+	case []any:
+		if len(val) > 0 {
+			if s, ok := val[0].(string); ok {
+				return s, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("missing required argument %q", key)
+}
+
 type EKBNServer struct {
 	ColumnsDir string
 	server     *server.MCPServer
@@ -380,8 +402,8 @@ func (e *EKBNServer) handleReadColumnsResource(ctx context.Context, req mcp.Read
 }
 
 func (e *EKBNServer) handleReadColumnResource(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	slug, ok := req.Params.Arguments["slug"].(string)
-	if !ok || slug == "" {
+	slug, err := extractArg(req.Params.Arguments, "slug")
+	if err != nil {
 		return nil, fmt.Errorf("slug parameter is required")
 	}
 
@@ -407,13 +429,12 @@ func (e *EKBNServer) handleReadColumnResource(ctx context.Context, req mcp.ReadR
 }
 
 func (e *EKBNServer) handleReadCardResource(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	column, ok := req.Params.Arguments["column"].(string)
-	if !ok || column == "" {
+	column, err := extractArg(req.Params.Arguments, "column")
+	if err != nil {
 		return nil, fmt.Errorf("column parameter is required")
 	}
-
-	filename, ok := req.Params.Arguments["filename"].(string)
-	if !ok || filename == "" {
+	filename, err := extractArg(req.Params.Arguments, "filename")
+	if err != nil {
 		return nil, fmt.Errorf("filename parameter is required")
 	}
 

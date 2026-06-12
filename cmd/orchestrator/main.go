@@ -29,7 +29,7 @@ type opencodeConfig struct {
 }
 
 const (
-	pollInterval = 300
+	pollInterval = 150
 	maxRetries   = 4
 	kanbanRoot   = ".kanban"
 	logFile      = ".kanban/orchestrator.log"
@@ -324,19 +324,9 @@ func runAgent(ticketPath string) bool {
 	log.info("▶  Starting ticket #%s \u2014 %s", ticketID, title)
 	prompt := buildSystemPrompt(ticketPath)
 
-	tmpFile, err := os.CreateTemp("", "ekbn-prompt-*.md")
-	if err != nil {
-		log.error("Failed to create temp prompt file: %v", err)
-		return false
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.WriteString(prompt)
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
-
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		log.info("   Attempt %d/%d", attempt, maxRetries)
-		cmd := exec.Command("opencode", "run", "--attach", "http://localhost:4096", "-f", tmpPath)
+		cmd := exec.Command("opencode", "run", "--attach", "http://localhost:4096", prompt)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
@@ -452,13 +442,22 @@ func main() {
 		default:
 		}
 
+		for hasActiveTickets() && !shutdown {
+			log.info("Waiting for active tickets to clear...")
+			// Poll every 10s instead of the full 150s
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) && !shutdown {
+				select {
+				case <-sigCh:
+					shutdown = true
+				case <-time.After(time.Second):
+				}
+			}
+		}
 		if shutdown {
 			break
 		}
-
-		if hasActiveTickets() {
-			log.info("Active tickets found \u2014 skipping cycle")
-		} else if ticket := pickTicket(); ticket != "" {
+		if ticket := pickTicket(); ticket != "" {
 			runAgent(ticket)
 		} else {
 			log.info("No tickets in todo/")
