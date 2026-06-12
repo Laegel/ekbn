@@ -1,5 +1,5 @@
 theme: dark
-folder-name: columns
+folder-name: .kanban
 port: 8089
 prompt: |
   Available tools: list_columns, create_card

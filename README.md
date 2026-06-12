@@ -3,14 +3,15 @@
 ![Screenshot](screenshot.png)
 
 A lightweight local tool for project management.
-You can edit the cards with your favorite text editor or open the web application
+You can edit the cards with your favorite text editor or open the web application.
+It comes with an agentic mode for planning and implementing.
 
 ## Architecture
 
 Each folder represents a column.
 1 task = 1 Markdown file in a column.
 1 server app reading and writing files, written in Go.
-1 front-end app, written in JS with DaisyUI.
+1 front-end app, written in TS with DaisyUI.
 
 It's all bundled in the binary so you don't have anything to install or build.
 You can find the binaries (Linux, Windows, macOS) in the Actions tab, in the merge PR workflows.
@@ -22,6 +23,10 @@ Requirement:
 
 The binary comes with a `serve` command. Careful, if no port is specified (as an environment variable or a config) then a random port is picked: it's convenient but when running the app from a GUI, the process will remain active unless you explicitely kill it.
 
+## Caveats
+
+If running ekbn inside a Docker Container, the agent needs to access your dev tools. I need to add a way to properly sandbox but provide the agent with some capabilities (a proxy? a proxy MCP?).
+
 ## Server & UI Capabilities
 
 - Create card
@@ -31,7 +36,7 @@ The binary comes with a `serve` command. Careful, if no port is specified (as an
 - Create column
 - Move column
 
-There's a file watcher that notifies the front-end whenever a card file is modified. The event is pushed via SSE in order to sync the state.
+There's a file watcher that notifies the front-end whenever a card file is created, modified, deleted or moved. The event is pushed via WebSocket in order to sync the state.
 
 ## MCP Support
 
