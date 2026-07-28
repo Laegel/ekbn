@@ -1,6 +1,6 @@
 theme: dark
 folder-name: .kanban
-port: 8089
+port: 8091
 prompt: |
   Available tools: list_columns, create_card
 
