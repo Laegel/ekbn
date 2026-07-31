@@ -20,11 +20,75 @@ import (
 	"ekbn/model"
 )
 
+// RoleConfig configures the agent invocation for one role. Command is the
+// full command line to run for this role — ekbn has no built-in agent CLI:
+// it splits Command into argv, appends the prompt as the final argument, and
+// execs it. An empty Command means nothing is invoked for that role at all;
+// ekbn never assumes or falls back to any particular CLI. Command and
+// MaxDurationMinutes are per-role, not global: a reviewer role can run a
+// smaller/faster model with a tighter time budget than an implementer role.
+// MaxDurationMinutes is enforced by the orchestrator killing the subprocess
+// (see runAgentAttempt) — that is the one budget dimension ekbn can enforce
+// itself without depending on any particular CLI's own accounting.
+type RoleConfig struct {
+	Prompt             string   `yaml:"prompt"`
+	Tools              []string `yaml:"tools"`
+	Skills             []string `yaml:"skills"`
+	Command            string   `yaml:"command"`
+	MaxDurationMinutes int      `yaml:"max_duration_minutes"`
+}
+
+// StageFlow is a stage sequence keyed by goal, not written into each item:
+// changing a flow's Stages/MaxRounds here takes effect for every card with
+// that goal without editing any existing card file.
+type StageFlow struct {
+	Stages    []string `yaml:"stages"`
+	MaxRounds int      `yaml:"max_rounds"`
+}
+
+// defaultFlows is used for any goal not overridden in ekbn.config.yml.
+var defaultFlows = map[string]StageFlow{
+	"bug":      {Stages: []string{"reproduce", "fix", "verify"}, MaxRounds: 3},
+	"feature":  {Stages: []string{"implement", "gates", "review"}, MaxRounds: 3},
+	"refactor": {Stages: []string{"tests-frozen", "implement", "verify-behavior"}, MaxRounds: 3},
+	"spike":    {Stages: []string{"research"}, MaxRounds: 0},
+}
+
+const defaultWIPLimit = 1
+
 type Config struct {
-	Theme      string `yaml:"theme"`
-	FolderName string `yaml:"folder-name"`
-	Port       int    `yaml:"port"`
-	Prompt     string `yaml:"prompt"`
+	Theme         string                `yaml:"theme"`
+	FolderName    string                `yaml:"folder-name"`
+	Port          int                   `yaml:"port"`
+	Prompt        string                `yaml:"prompt"`
+	Verify        string                `yaml:"verify"`
+	Roles         map[string]RoleConfig `yaml:"roles"`
+	SecurityPaths []string              `yaml:"security-paths"`
+	Flows         map[string]StageFlow  `yaml:"flows"`
+	// WIPLimit is currently clamped to 1 by the orchestrator regardless of
+	// this value: tickets run directly in the shared working directory (no
+	// per-ticket git worktree), so more than one in flight at once isn't
+	// safe. The field is kept for when branch/worktree-based concurrency
+	// returns.
+	WIPLimit int `yaml:"wip-limit"`
+	// DoneOnCleanReview, if true, treats a clean code-review pass (no
+	// concrete findings, and no security findings if applicable) as
+	// sufficient to mark a ticket done even when it has no Acceptance
+	// criteria of its own — reducing how often a human has to manually
+	// promote a reviewed ticket. Off by default: without a scripted
+	// acceptance check, "the reviewer had nothing to say" is not the same
+	// guarantee as "a human confirmed this is right," so this is an explicit
+	// trade a project opts into, not silently assumed.
+	DoneOnCleanReview bool `yaml:"done-on-clean-review"`
+}
+
+// FlowFor returns the stage flow for goal, falling back to defaultFlows when
+// goal is unset or not present in either the config or the defaults.
+func (c Config) FlowFor(goal string) StageFlow {
+	if f, ok := c.Flows[goal]; ok {
+		return f
+	}
+	return defaultFlows[goal]
 }
 
 func configPath() string {
@@ -37,7 +101,7 @@ func configPath() string {
 }
 
 func LoadConfig() Config {
-	cfg := Config{Theme: "dark", FolderName: "columns", Port: 0}
+	cfg := Config{Theme: "dark", FolderName: "columns", Port: 0, WIPLimit: defaultWIPLimit}
 	path := configPath()
 	if path == "" {
 		return cfg
@@ -63,6 +127,22 @@ func LoadConfig() Config {
 	if parsed.Prompt != "" {
 		cfg.Prompt = parsed.Prompt
 	}
+	if parsed.Verify != "" {
+		cfg.Verify = parsed.Verify
+	}
+	if len(parsed.Roles) > 0 {
+		cfg.Roles = parsed.Roles
+	}
+	if len(parsed.SecurityPaths) > 0 {
+		cfg.SecurityPaths = parsed.SecurityPaths
+	}
+	if len(parsed.Flows) > 0 {
+		cfg.Flows = parsed.Flows
+	}
+	if parsed.WIPLimit > 0 {
+		cfg.WIPLimit = parsed.WIPLimit
+	}
+	cfg.DoneOnCleanReview = parsed.DoneOnCleanReview
 	return cfg
 }
 
@@ -78,7 +158,10 @@ func getColumnsDir(folderName string) string {
 	return abs
 }
 
-var defaultColumnSlugs = []string{"todo", "in-progress", "review", "done"}
+var defaultColumnSlugs = []string{
+	string(model.StatusTodo), string(model.StatusInProgress), string(model.StatusReview),
+	string(model.StatusDone), string(model.StatusBlocked), string(model.StatusBudgetExhausted),
+}
 
 func ensureColumns(columnsDir string) {
 	existing, _ := os.ReadDir(columnsDir)
@@ -484,7 +567,10 @@ func handleCards(broker *eventBroker, watcher *folderWatcher) http.HandlerFunc {
 			Categories []string `json:"categories"`
 			Priority   int      `json:"priority"`
 			Role       string   `json:"role"`
-			Blocked    bool     `json:"blocked"`
+			Goal       string   `json:"goal"`
+			DependsOn  []string `json:"depends_on"`
+			Acceptance string   `json:"acceptance"`
+			Unresolved string   `json:"unresolved"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			errorResponse(w, http.StatusBadRequest, "Invalid JSON")
@@ -496,7 +582,18 @@ func handleCards(broker *eventBroker, watcher *folderWatcher) http.HandlerFunc {
 			return
 		}
 
-		filename, err := model.CreateCard(columnsDir, req.Column, req.Title, "user", req.Content, req.Categories, req.Priority, req.Role, req.Blocked)
+		filename, err := model.CreateCard(columnsDir, req.Column, model.CardFields{
+			Title:      req.Title,
+			Author:     "user",
+			Content:    req.Content,
+			Categories: req.Categories,
+			Priority:   req.Priority,
+			Role:       req.Role,
+			Goal:       req.Goal,
+			DependsOn:  req.DependsOn,
+			Acceptance: req.Acceptance,
+			Unresolved: req.Unresolved,
+		})
 		if err != nil {
 			errorResponse(w, http.StatusInternalServerError, err.Error())
 			return
@@ -567,14 +664,27 @@ func handleUpdateCard(w http.ResponseWriter, r *http.Request, column, filename s
 		Categories []string `json:"categories"`
 		Priority   int      `json:"priority"`
 		Role       string   `json:"role"`
-		Blocked    bool     `json:"blocked"`
+		Goal       string   `json:"goal"`
+		DependsOn  []string `json:"depends_on"`
+		Acceptance string   `json:"acceptance"`
+		Unresolved string   `json:"unresolved"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	if err := model.UpdateCard(columnsDir, column, filename, req.Title, req.Content, req.Categories, req.Priority, req.Role, req.Blocked); err != nil {
+	if err := model.UpdateCard(columnsDir, column, filename, model.CardFields{
+		Title:      req.Title,
+		Content:    req.Content,
+		Categories: req.Categories,
+		Priority:   req.Priority,
+		Role:       req.Role,
+		Goal:       req.Goal,
+		DependsOn:  req.DependsOn,
+		Acceptance: req.Acceptance,
+		Unresolved: req.Unresolved,
+	}); err != nil {
 		errorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}

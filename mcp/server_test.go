@@ -17,7 +17,7 @@ func newTestServer(t *testing.T) (*EKBNServer, string) {
 	if err := os.MkdirAll(colDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	return New(dir), dir
+	return New(dir, false), dir
 }
 
 func TestListColumns(t *testing.T) {
@@ -48,12 +48,13 @@ func TestCreateCard(t *testing.T) {
 
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{
-		"column":   "100-todo",
-		"title":    "Test Card Title",
-		"content":  "This is the card content.",
-		"priority": float64(1),
-		"role":     "dev",
-		"blocked":  false,
+		"column":     "100-todo",
+		"title":      "Test Card Title",
+		"content":    "This is the card content.",
+		"priority":   float64(1),
+		"role":       "dev",
+		"goal":       "feature",
+		"acceptance": "npm test",
 	}
 
 	result, err := srv.handleCreateCard(context.Background(), req)
@@ -153,6 +154,60 @@ func TestCreateCardMissingTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Should not panic — title is required by model.CreateCard
+}
+
+func TestDeclareBlocked(t *testing.T) {
+	srv, dir := newTestServer(t)
+
+	createReq := mcp.CallToolRequest{}
+	createReq.Params.Arguments = map[string]interface{}{
+		"column": "100-todo",
+		"title":  "Blockable Card",
+	}
+	if _, err := srv.handleCreateCard(context.Background(), createReq); err != nil {
+		t.Fatal(err)
+	}
+
+	ents, _ := os.ReadDir(filepath.Join(dir, "100-todo"))
+	var filename string
+	for _, e := range ents {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".md" {
+			filename = e.Name()
+		}
+	}
+	if filename == "" {
+		t.Fatal("no card file found to block")
+	}
+
+	blockReq := mcp.CallToolRequest{}
+	blockReq.Params.Arguments = map[string]interface{}{
+		"column":   "100-todo",
+		"filename": filename,
+		"reason":   "cannot proceed without design input",
+	}
+	if _, err := srv.handleDeclareBlocked(context.Background(), blockReq); err != nil {
+		t.Fatal(err)
+	}
+
+	// The card moves to whichever folder backs "blocked" — since none exists
+	// in this bare test fixture, it stays in place but its frontmatter must
+	// still say so.
+	data, err := os.ReadFile(filepath.Join(dir, "100-todo", filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(string(data), "status: blocked") {
+		t.Errorf("card file does not contain status: blocked:\n%s", data)
+	}
+	if !containsStr(string(data), "cannot proceed without design input") {
+		t.Errorf("card file does not contain the blocked reason:\n%s", data)
+	}
+}
+
+func TestDeclareBlockedNotInMutatingTools(t *testing.T) {
+	if mutatingTools["declare_blocked"] {
+		t.Error("declare_blocked must not be in mutatingTools: it is the one write path a read-only agent retains")
+	}
 }
 
 func containsStr(s, substr string) bool {

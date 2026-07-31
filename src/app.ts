@@ -7,7 +7,10 @@ interface Card {
   updated: string;
   priority?: number;
   role?: string;
-  blocked?: boolean;
+  goal?: string;
+  acceptance?: string;
+  status?: string;
+  reason?: string;
   categories?: string[];
   comments?: Comment[];
 }
@@ -278,8 +281,10 @@ export function initApp() {
     el.dataset.filename = card.filename;
     el.dataset.column = column;
 
+    const isBlocked = card.status === "blocked" || card.status === "budget-exhausted";
+
     const categoriesHtml =
-      card.categories && card.categories.length && !card.blocked
+      card.categories && card.categories.length && !isBlocked
         ? `<div class="flex flex-wrap gap-1 mt-2">${card.categories.map((c) => `<span class="badge badge-primary badge-sm">${escapeHtml(c)}</span>`).join("")}</div>`
         : "";
 
@@ -291,16 +296,16 @@ export function initApp() {
       ? `<span class="badge badge-sm badge-outline">${escapeHtml(card.role)}</span>`
       : "";
 
-    const blockedHtml = card.blocked
-      ? `<span class="badge badge-sm badge-error">blocked</span>`
+    const statusHtml = isBlocked
+      ? `<span class="badge badge-sm badge-error" title="${escapeHtml(card.reason || "")}">${escapeHtml(card.status!)}</span>`
       : "";
 
     el.innerHTML = `
-          <div class="card-body p-3 ${card.blocked ? 'opacity-60' : ''}">
+          <div class="card-body p-3 ${isBlocked ? 'opacity-60' : ''}">
               <div class="flex justify-between items-start">
                   <h3 class="card-title text-sm font-medium">${escapeHtml(card.title)}</h3>
                   <div class="card-actions justify-end gap-1">
-                      ${blockedHtml}
+                      ${statusHtml}
                       ${roleHtml}
                       ${priorityHtml}
                       <button class="btn btn-ghost btn-xs p-1 min-h-0 h-auto" title="Edit">✏️</button>
@@ -394,8 +399,7 @@ export function initApp() {
               const priority = prioEl && prioEl.textContent!.startsWith("P") ? parseInt(prioEl.textContent!.slice(1)) : 0;
               const roleEl = cardEl.querySelector(".badge-outline") as HTMLElement | null;
               const role = roleEl ? roleEl.textContent! : "";
-              const blockedEl = [...cardEl.querySelectorAll(".badge-error")].find(b => b.textContent === "blocked");
-              const blocked = !!blockedEl;
+              const status = columnSlug(toColumn);
               const newEl = createCardElement(
                 {
                   filename: data.filename,
@@ -403,7 +407,7 @@ export function initApp() {
                   updated: new Date().toISOString(),
                   priority: priority,
                   role: role,
-                  blocked: blocked,
+                  status: status,
                 },
                 toColumn,
               );
@@ -549,7 +553,8 @@ export function initApp() {
     contentInput.value = "";
     (document.getElementById("card-priority-input") as HTMLInputElement).value = "";
     (document.getElementById("card-role-input") as HTMLInputElement).value = "";
-    (document.getElementById("card-blocked-input") as HTMLInputElement).checked = false;
+    (document.getElementById("card-goal-input") as HTMLSelectElement).value = "";
+    (document.getElementById("card-acceptance-input") as HTMLInputElement).value = "";
     categoriesInput.value = "";
     clearCategories();
     currentColumn = column;
@@ -580,7 +585,8 @@ export function initApp() {
     contentInput.value = card.content || "";
     (document.getElementById("card-priority-input") as HTMLInputElement).value = card.priority ? String(card.priority) : "";
     (document.getElementById("card-role-input") as HTMLInputElement).value = card.role || "";
-    (document.getElementById("card-blocked-input") as HTMLInputElement).checked = !!card.blocked;
+    (document.getElementById("card-goal-input") as HTMLSelectElement).value = card.goal || "";
+    (document.getElementById("card-acceptance-input") as HTMLInputElement).value = card.acceptance || "";
     setCategories(card.categories || []);
     renderComments(card.comments || []);
     showMarkdownPreview();
@@ -597,7 +603,8 @@ export function initApp() {
     const categories = getCategories();
     const priority = parseInt((document.getElementById("card-priority-input") as HTMLInputElement).value) || 0;
     const role = (document.getElementById("card-role-input") as HTMLInputElement).value.trim();
-    const blocked = (document.getElementById("card-blocked-input") as HTMLInputElement).checked;
+    const goal = (document.getElementById("card-goal-input") as HTMLSelectElement).value;
+    const acceptance = (document.getElementById("card-acceptance-input") as HTMLInputElement).value.trim();
 
     try {
       let res: Response;
@@ -605,13 +612,13 @@ export function initApp() {
         res = await fetch(`/api/card/${column}/${filename}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title, content, categories, priority, role, blocked }),
+          body: JSON.stringify({ title, content, categories, priority, role, goal, acceptance }),
         });
       } else {
         res = await fetch("/api/cards", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ column, title, content, categories, priority, role, blocked }),
+          body: JSON.stringify({ column, title, content, categories, priority, role, goal, acceptance }),
         });
       }
       if (!res.ok) throw new Error("Failed to save card");
@@ -740,6 +747,10 @@ export function initApp() {
     }
   }
 
+  function columnSlug(dirName: string): string {
+    return dirName.replace(/^\d+-/, "");
+  }
+
   function escapeHtml(text: string): string {
     const div = document.createElement("div");
     div.textContent = text;
@@ -864,17 +875,20 @@ export function initApp() {
       roleBadge.remove();
     }
 
-    let blockedBadge = [...actions.querySelectorAll(".badge-error")].find(b => b.textContent === "blocked") as HTMLElement | undefined;
-    if (card.blocked) {
-      if (!blockedBadge) {
-        blockedBadge = document.createElement("span");
-        blockedBadge.className = "badge badge-sm badge-error";
-        blockedBadge.textContent = "blocked";
-        actions.insertBefore(blockedBadge, actions.firstChild);
+    const isBlocked = card.status === "blocked" || card.status === "budget-exhausted";
+    const statusTexts = ["blocked", "budget-exhausted"];
+    let statusBadge = [...actions.querySelectorAll(".badge-error")].find(b => statusTexts.includes(b.textContent || "")) as HTMLElement | undefined;
+    if (isBlocked) {
+      if (!statusBadge) {
+        statusBadge = document.createElement("span");
+        statusBadge.className = "badge badge-sm badge-error";
+        actions.insertBefore(statusBadge, actions.firstChild);
       }
+      statusBadge.textContent = card.status!;
+      if (card.reason) statusBadge.title = card.reason;
       el.querySelector(".card-body")!.classList.add("opacity-60");
     } else {
-      if (blockedBadge) blockedBadge.remove();
+      if (statusBadge) statusBadge.remove();
       el.querySelector(".card-body")!.classList.remove("opacity-60");
     }
 
