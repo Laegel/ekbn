@@ -114,11 +114,12 @@ func runCycle(cfg serve.Config) {
 		log.error("Failed to load cards: %v", err)
 		return
 	}
-	// Clamped to 1 regardless of cfg.WIPLimit: tickets now run directly in
-	// this shared working directory rather than each in its own worktree, so
-	// more than one in flight at a time would let two agents' edits, verify
-	// runs, and commits collide. Revisit once branch/worktree-based
-	// concurrency returns.
+	// Clamped to 1 regardless of cfg.WIPLimit: each ticket now runs in its
+	// own git worktree/branch again, but the merge-on-terminal-state step
+	// only handles a fast-forward — it assumes every ticket branches from
+	// main's current HEAD and finishes before the next one starts. Raising
+	// this needs a real rebase/conflict story for merges that no longer land
+	// in the order tickets were claimed; that's the next step, not this one.
 	capacity := min(1, cfg.WIPLimit) - countInProgress(cards)
 	ready := selectReadyTickets(cards, capacity)
 	log.info("Poll cycle: %d cards loaded, %d in progress, capacity %d, %d ready", len(cards), countInProgress(cards), capacity, len(ready))

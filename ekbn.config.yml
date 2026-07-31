@@ -66,6 +66,12 @@ prompt: |
 # and the ticket/review/spec prompt is appended as the final argument, e.g.
 # `command: opencode run -m anthropic/claude-sonnet-4-5 --dangerously-skip-permissions`
 # becomes `opencode run -m anthropic/claude-sonnet-4-5 --dangerously-skip-permissions "<prompt>"`.
+# The implementer's command may include the literal token `{workdir}`,
+# substituted with the ticket's actual worktree directory before the command
+# runs. This is needed on top of plain cwd for agent CLIs that resolve "the
+# project" through their own persistent state rather than the process's
+# working directory — e.g. `opencode run --dir {workdir} -m ...` — since cwd
+# alone silently let opencode operate on a remembered path instead.
 # Leaving `command` unset means nothing is invoked for that role at all: an
 # implementer ticket is blocked with reason `no-agent-command-configured`
 # rather than silently stuck; an unconfigured reviewer/security-reviewer gate

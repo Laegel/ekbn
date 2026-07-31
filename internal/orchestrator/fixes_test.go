@@ -139,6 +139,89 @@ func TestFix_SuccessAdvancesToReview(t *testing.T) {
 	}
 }
 
+// TestFix_RunAgentAttemptSubstitutesWorkdirTemplate confirms {workdir} in a
+// role's command is replaced with the actual directory the agent is meant
+// to run in — needed because cmd.Dir alone isn't always respected by an
+// agent CLI's own project-resolution (see the comment in runAgentAttempt).
+func TestFix_RunAgentAttemptSubstitutesWorkdirTemplate(t *testing.T) {
+	dir := t.TempDir()
+	helperDir := t.TempDir()
+	argsFile := filepath.Join(helperDir, "args.txt")
+	script := "#!/bin/sh\necho \"$1\" > " + shq(argsFile) + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(helperDir, "fakecmd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	command := filepath.Join(helperDir, "fakecmd") + " {workdir}"
+	if _, err, _, _ := runAgentAttempt("prompt", dir, command, 0); err != nil {
+		t.Fatalf("runAgentAttempt failed: %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("shim never ran: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != dir {
+		t.Errorf("{workdir} substituted to %q, want %q", strings.TrimSpace(string(got)), dir)
+	}
+}
+
+// TestFix_AgentEscapedWorktreeBlocksTicket simulates the exact bug worktree
+// isolation was removed over previously: an agent writing outside its
+// assigned worktree, directly into the shared main checkout. The escape
+// detector must catch this and block the ticket rather than let it proceed
+// as if nothing happened.
+func TestFix_AgentEscapedWorktreeBlocksTicket(t *testing.T) {
+	dir := fixSetup(t, "exit 0")
+	escapeBody := "  touch " + shq(filepath.Join(dir, "escaped.txt"))
+	fakeAgentAndReviewer(t, escapeBody, filepath.Join(t.TempDir(), "no-findings"))
+
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
+	runCycle(loadTestConfig(t))
+
+	if !fileExists(".kanban/400-blocked/card.md") {
+		t.Fatal("card did not block after the agent escaped its worktree")
+	}
+	card := mustReadCard(t, ".kanban/400-blocked/card.md")
+	if card.Reason != "agent-escaped-worktree" {
+		t.Errorf("Reason = %q, want agent-escaped-worktree", card.Reason)
+	}
+	if !strings.Contains(card.Content, "escaped.txt") {
+		t.Errorf("blocked card's findings should mention the escaped file: %q", card.Content)
+	}
+	if want := worktreeDir(dir, "1"); card.Worktree != want {
+		t.Errorf("Worktree = %q, want %q — should stay visible on a blocked card", card.Worktree, want)
+	}
+}
+
+// TestFix_MergeRemovesWorktreeAndBranch confirms that reaching a terminal
+// state doesn't just move the commit onto main — it also tears down the
+// ticket's worktree and branch, so nothing lingers once a ticket finishes.
+func TestFix_MergeRemovesWorktreeAndBranch(t *testing.T) {
+	dir := fixSetup(t, "exit 0")
+	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
+
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "9")
+	runCycle(loadTestConfig(t))
+
+	if !fileExists(".kanban/250-review/card.md") {
+		t.Fatal("card did not reach 250-review")
+	}
+	if fileExists(worktreeDir(dir, "9")) {
+		t.Error("worktree directory should have been removed after merging")
+	}
+	if branches := gitOut(t, "branch", "--list", worktreeBranch("9")); branches != "" {
+		t.Errorf("branch %q should have been deleted after merging, got %q", worktreeBranch("9"), branches)
+	}
+	if log := gitOut(t, "log", "--oneline"); !strings.Contains(log, "9: Test") {
+		t.Errorf("main branch log should contain the ticket's commit: %q", log)
+	}
+	card := mustReadCard(t, ".kanban/250-review/card.md")
+	if card.Worktree != "" {
+		t.Errorf("Worktree = %q, want empty once the worktree is merged and removed", card.Worktree)
+	}
+}
+
 // TestFix_DoneOnCleanReviewSkipsReviewStage confirms the opt-in
 // done-on-clean-review config flag lets a ticket with no Acceptance
 // criteria go straight to done on a clean reviewer pass, instead of
@@ -175,11 +258,70 @@ func TestFix_DoneOnCleanReviewSkipsReviewStage(t *testing.T) {
 	}
 }
 
+// TestFix_ProseAcceptanceDoesNotBlock guards against a real bug: Acceptance
+// is documented as either a real command or descriptive prose, but a prose
+// value handed to sh -c fails with "command not found" (exit 127) and used
+// to block the ticket outright. Prose should behave exactly like no
+// acceptance at all — reviewed, not blocked, not silently auto-done.
+func TestFix_ProseAcceptanceDoesNotBlock(t *testing.T) {
+	fixSetup(t, "exit 0")
+	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
+
+	mustWrite(t, ".kanban/100-todo/card.md",
+		"---\ntitle: Test\nid: 1\nstatus: todo\nacceptance: \"Prose: some criteria are met\"\n---\n\nDo the thing.\n")
+
+	runCycle(loadTestConfig(t))
+
+	if fileExists(".kanban/400-blocked/card.md") {
+		t.Fatal("card should not block on prose acceptance text")
+	}
+	if !fileExists(".kanban/250-review/card.md") {
+		t.Fatal("card with prose acceptance should land in review, same as no acceptance at all")
+	}
+}
+
+// TestFix_PassingAcceptanceStillGoesDone is a regression check: a real,
+// passing acceptance command must still auto-promote the ticket to done.
+func TestFix_PassingAcceptanceStillGoesDone(t *testing.T) {
+	fixSetup(t, "exit 0")
+	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
+
+	mustWrite(t, ".kanban/100-todo/card.md",
+		"---\ntitle: Test\nid: 1\nstatus: todo\nacceptance: \"exit 0\"\n---\n\nDo the thing.\n")
+
+	runCycle(loadTestConfig(t))
+
+	if !fileExists(".kanban/300-done/card.md") {
+		t.Fatal("a real, passing acceptance command should still auto-promote the ticket to done")
+	}
+}
+
+// TestFix_FailingAcceptanceStillBlocks is a regression check: a real
+// command that genuinely fails (not "command not found") must still block.
+func TestFix_FailingAcceptanceStillBlocks(t *testing.T) {
+	fixSetup(t, "exit 0")
+	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
+
+	mustWrite(t, ".kanban/100-todo/card.md",
+		"---\ntitle: Test\nid: 1\nstatus: todo\nacceptance: \"exit 1\"\n---\n\nDo the thing.\n")
+
+	runCycle(loadTestConfig(t))
+
+	if !fileExists(".kanban/400-blocked/card.md") {
+		t.Fatal("a real, failing acceptance command should still block the ticket")
+	}
+	card := mustReadCard(t, ".kanban/400-blocked/card.md")
+	if card.Reason != "acceptance-check-failed" {
+		t.Errorf("Reason = %q, want acceptance-check-failed", card.Reason)
+	}
+}
+
 // TestFix_PreexistingUntrackedFileNotCommitted guards against a real bug:
-// with no worktree isolating a ticket's edits from the rest of the project,
-// a naive `git add -A` at commit time sweeps in whatever untracked
-// scaffolding was already sitting in the working directory (an agent CLI's
-// own config file, in this case) right along with the agent's actual work.
+// a naive `git add -A` at commit time, run inside a ticket's own worktree,
+// sweeps in whatever untracked scaffolding an agent CLI drops there on its
+// own (its own config file, in this case) right along with the agent's
+// actual work — worktree isolation from the rest of the project doesn't by
+// itself keep a single worktree free of that kind of incidental clutter.
 func TestFix_PreexistingUntrackedFileNotCommitted(t *testing.T) {
 	fixSetup(t, "exit 0")
 	os.WriteFile("opencode.json", []byte(`{"mcp":{}}`), 0644)
@@ -206,9 +348,10 @@ func TestFix_PreexistingUntrackedFileNotCommitted(t *testing.T) {
 }
 
 // TestFix_WIPLimitClampedToOne asserts that, even with a higher WIPLimit
-// configured, capacity is clamped to 1: tickets run directly in the shared
-// working directory now (no per-ticket worktree), so only one may be in
-// flight at a time regardless of config.
+// configured, capacity is clamped to 1: each ticket has its own worktree
+// again, but merging one back into main on completion only handles a
+// fast-forward, which assumes tickets finish in the order they were
+// claimed — real concurrency needs its own conflict/rebase story first.
 func TestFix_WIPLimitClampedToOne(t *testing.T) {
 	fixSetup(t, "exit 0")
 	fakeAgentAndReviewer(t, countingAgentBody(t), filepath.Join(t.TempDir(), "no-findings"))
@@ -430,16 +573,128 @@ func TestFix_MultiStageAdvancement(t *testing.T) {
 	if card.Round != 0 {
 		t.Errorf("Round = %d, want 0 (reset on stage advance)", card.Round)
 	}
-	if !fileExists("file1.txt") {
-		t.Error("the implement stage's commit should already be on the main branch")
+	if fileExists("file1.txt") {
+		t.Error("the implement stage's commit isn't merged yet — it should not be on the main branch until the ticket reaches its terminal state")
+	}
+	if !fileExists(filepath.Join(worktreeDir(dir, "1"), "file1.txt")) {
+		t.Error("the implement stage's commit should be sitting in the ticket's own worktree, isolated from main")
 	}
 
 	runCycle(loadTestConfig(t)) // stage 2: gates (last stage) -> review
 	if !fileExists(".kanban/250-review/card.md") {
 		t.Fatal("after finishing the last stage, the card should reach review")
 	}
+	if !fileExists("file1.txt") {
+		t.Error("the implement stage's commit should be on the main branch now that the ticket has merged")
+	}
 	if !fileExists("file2.txt") {
 		t.Error("the gates stage's commit should already be on the main branch")
+	}
+}
+
+// TestFix_ReviewerGetsStageContextForNonFinalStage guards against a real
+// bug: a reviewer given only the ticket's full body has no way to know a
+// multi-stage flow exists, so it judges an early stage's diff against the
+// ticket's overall acceptance criteria and flags legitimately-incomplete
+// work as a concern. This confirms the reviewer prompt now says otherwise.
+func TestFix_ReviewerGetsStageContextForNonFinalStage(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origWd) })
+
+	initGitRepo(t)
+	cfg := "verify: \"exit 0\"\n" +
+		"wip-limit: 1\n" +
+		"flows:\n  feature:\n    stages: [reproduce, fix]\n    max_rounds: 2\n" +
+		testRolesConfig
+	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
+	ensureKanbanDirs()
+
+	_, promptFile := fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
+
+	runCycle(loadTestConfig(t))
+
+	prompt, err := os.ReadFile(promptFile)
+	if err != nil {
+		t.Fatalf("reviewer was never invoked: %v", err)
+	}
+	got := string(prompt)
+	if !strings.Contains(got, `this diff is only stage "reproduce" (1 of 2)`) {
+		t.Errorf("reviewer prompt missing stage context: %q", got)
+	}
+	if !strings.Contains(got, "Do not expect the ticket's overall acceptance criteria to be met yet") {
+		t.Errorf("reviewer prompt missing the don't-expect-full-criteria guidance: %q", got)
+	}
+}
+
+// TestFix_ReviewerGetsNoStageContextForSingleStageFlow confirms the common
+// case (a single-stage flow) is unaffected — no stage-context text at all.
+func TestFix_ReviewerGetsNoStageContextForSingleStageFlow(t *testing.T) {
+	fixSetup(t, "exit 0")
+	_, promptFile := fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
+
+	runCycle(loadTestConfig(t))
+
+	prompt, err := os.ReadFile(promptFile)
+	if err != nil {
+		t.Fatalf("reviewer was never invoked: %v", err)
+	}
+	if strings.Contains(string(prompt), "This ticket is worked in stages") {
+		t.Errorf("single-stage flow should get no stage context, got: %q", string(prompt))
+	}
+}
+
+// TestFix_NoChangesNeededInstructionIsStageAware guards against a real bug:
+// the implementer's final stage often has nothing left to change (earlier
+// stages already did the work), but a generic "say so if nothing needs to
+// change" instruction didn't reliably get the agent to use the "## No
+// Changes Needed" marker there, leaving the ticket blocked with a low-value
+// message instead. The final stage's prompt must reassure the agent this is
+// a normal, expected outcome; a non-final stage's prompt must not.
+func TestFix_NoChangesNeededInstructionIsStageAware(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origWd) })
+
+	initGitRepo(t)
+	cfg := "verify: \"exit 0\"\n" +
+		"wip-limit: 1\n" +
+		"flows:\n  feature:\n    stages: [reproduce, fix]\n    max_rounds: 2\n" +
+		testRolesConfig
+	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
+	ensureKanbanDirs()
+
+	agentPromptFile := filepath.Join(t.TempDir(), "agent-prompt.txt")
+	agentBody := "  printf '%s' \"$2\" > " + shq(agentPromptFile) + "\n  touch file1.txt"
+	fakeAgentAndReviewer(t, agentBody, filepath.Join(t.TempDir(), "no-findings"))
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
+
+	runCycle(loadTestConfig(t)) // stage 1: reproduce (not last stage)
+
+	prompt1, err := os.ReadFile(agentPromptFile)
+	if err != nil {
+		t.Fatalf("agent was never invoked: %v", err)
+	}
+	if strings.Contains(string(prompt1), "final stage of a multi-stage ticket") {
+		t.Errorf("non-final stage's prompt should not get the final-stage reassurance: %q", prompt1)
+	}
+
+	runCycle(loadTestConfig(t)) // stage 2: fix (last stage)
+
+	prompt2, err := os.ReadFile(agentPromptFile)
+	if err != nil {
+		t.Fatalf("agent was never invoked on stage 2: %v", err)
+	}
+	got := string(prompt2)
+	if !strings.Contains(got, "final stage of a multi-stage ticket") {
+		t.Errorf("final stage's prompt should get the final-stage reassurance: %q", got)
+	}
+	if !strings.Contains(got, "multi-stage ticket (reproduce → fix)") {
+		t.Errorf("final stage's prompt should name the full stage sequence: %q", got)
 	}
 }
 
@@ -476,6 +731,58 @@ func TestFix_ReviewRoundsCycleThenBlock(t *testing.T) {
 	card = mustReadCard(t, ".kanban/400-blocked/card.md")
 	if card.Reason != "review-rounds-exhausted" {
 		t.Errorf("Reason = %q, want review-rounds-exhausted", card.Reason)
+	}
+}
+
+// TestStripReviewFindings guards against a real bug: a reviewer that sees
+// its own or a prior round's appended finding inside the ticket content
+// starts arguing with that past finding instead of reviewing the diff.
+func TestStripReviewFindings(t *testing.T) {
+	original := "Original ticket description.\n"
+	want := strings.TrimRight(original, "\n")
+
+	withOneFinding := original + "\n## Review Findings\n\n## Concern\n\nsomething wrong\n"
+	if got := stripReviewFindings(withOneFinding); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	withTwoFindings := withOneFinding + "\n## Review Findings\n\n## Concern\n\nanother thing\n"
+	if got := stripReviewFindings(withTwoFindings); got != want {
+		t.Errorf("should strip from the first occurrence: got %q, want %q", got, want)
+	}
+
+	if got := stripReviewFindings(original); got != original {
+		t.Errorf("content with no Review Findings section should be returned unchanged: got %q, want %q", got, original)
+	}
+}
+
+// TestFix_ReviewerNeverSeesPastFindings guards against a real bug found
+// live: round 1's reviewer finding gets appended to the card, and round 2's
+// reviewer — shown the raw card content — started re-litigating round 1's
+// (wrong) finding instead of reviewing the diff fresh, still wrapping its
+// rebuttal in "## Concern" and needlessly cycling the ticket again.
+func TestFix_ReviewerNeverSeesPastFindings(t *testing.T) {
+	dir := fixSetup(t, "exit 0")
+	findings := filepath.Join(dir, "findings.txt")
+	os.WriteFile(findings, []byte("## Concern\n\nthis needs work"), 0644)
+	_, promptFile := fakeAgentAndReviewer(t, "  touch feature.txt", findings)
+
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "6")
+	cfg := loadTestConfig(t)
+
+	runCycle(cfg) // round 1: finding appended to the card, cycles back to todo
+	runCycle(cfg) // round 2: reviewer runs again — must not see round 1's appended finding
+
+	prompt, err := os.ReadFile(promptFile)
+	if err != nil {
+		t.Fatalf("reviewer was never invoked: %v", err)
+	}
+	got := string(prompt)
+	if strings.Contains(got, "## Review Findings") {
+		t.Errorf("reviewer prompt still contains an accumulated Review Findings section: %q", got)
+	}
+	if strings.Contains(got, "this needs work") {
+		t.Errorf("reviewer prompt still contains a prior round's finding text: %q", got)
 	}
 }
 

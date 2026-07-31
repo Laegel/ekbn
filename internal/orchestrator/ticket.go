@@ -173,6 +173,14 @@ exit 1
 		defer cancel()
 	}
 
+	// cmd.Dir alone isn't always enough: some agent CLIs (opencode included)
+	// resolve "the project" through their own persistent state rather than
+	// process cwd — e.g. keyed off the repo's shared git commondir, which is
+	// identical for a worktree and the main checkout — and silently operate
+	// on a remembered path instead of dir. {workdir} lets a role's command
+	// pass dir explicitly (e.g. `opencode run --dir {workdir} ...`) to any
+	// CLI that supports it, without ekbn hardcoding a specific tool's flag.
+	command = strings.ReplaceAll(command, "{workdir}", dir)
 	argv := strings.Fields(command)
 	args := append(append([]string{}, argv[1:]...), prompt)
 
@@ -394,9 +402,28 @@ func runTicket(cfg serve.Config, card model.Card) {
 	column = newColumn
 	path := filepath.Join(kanbanRoot, column, filename)
 
-	headSha, headErr := git(projectRoot, "rev-parse", "HEAD")
+	mainHead, headErr := git(projectRoot, "rev-parse", "HEAD")
 	if headErr != nil {
 		log.warn("Ticket #%s: failed to resolve HEAD for base_sha (%v) — cumulative review diff will fall back to per-commit for this round", id, headErr)
+	}
+
+	// A worktree is created (or reused, for a later round/stage) right after
+	// claim, unconditionally — including for spikes and tickets that turn
+	// out to have no agent configured. Both of those tear it straight back
+	// down (see below) rather than needing a second code path that skips
+	// creation, keeping this one claim sequence uniform for every ticket.
+	workDir, wtErr := ensureWorktree(projectRoot, id, mainHead)
+	if wtErr != nil {
+		log.error("Failed to prepare worktree for ticket #%s: %v — will retry next cycle", id, wtErr)
+		return
+	}
+	// A freshly created worktree's own HEAD is mainHead; a reused one (later
+	// stage of the same ticket) correctly reflects that ticket's own
+	// accumulated commits instead — either way, this is the right base for
+	// a stage's cumulative review diff once BaseSHA is reset by advanceStage.
+	headSha := mainHead
+	if wh, whErr := git(workDir, "rev-parse", "HEAD"); whErr == nil {
+		headSha = wh
 	}
 
 	withCard(column, filename, func(c *model.Card) {
@@ -404,6 +431,7 @@ func runTicket(cfg serve.Config, card model.Card) {
 		c.LeaseOwner = leaseOwner()
 		c.LeaseExpires = time.Now().Add(leaseDuration).Format(time.RFC3339)
 		c.Checkpoint = "claimed"
+		c.Worktree = workDir
 		if c.BaseSHA == "" {
 			c.BaseSHA = headSha
 		}
@@ -414,9 +442,11 @@ func runTicket(cfg serve.Config, card model.Card) {
 		return
 	}
 
-	log.info("▶  Starting ticket #%s (goal=%s stage=%s round=%d base_sha=%s) — %s", id, goal, stage, card.Round, previewSHA(card.BaseSHA), title)
+	log.info("▶  Starting ticket #%s (goal=%s stage=%s round=%d base_sha=%s worktree=%s) — %s", id, goal, stage, card.Round, previewSHA(card.BaseSHA), workDir, title)
 
 	if goal == "spike" {
+		removeWorktreeIfPresent(projectRoot, id)
+		withCard(column, filename, func(c *model.Card) { c.Worktree = "" })
 		runSpike(cfg, path, column, filename, card, projectRoot)
 		return
 	}
@@ -434,23 +464,45 @@ func runTicket(cfg serve.Config, card model.Card) {
 		transitionBlocked(column, filename, "no-agent-command-configured")
 		return
 	}
-	prompt := buildSystemPrompt(path, card, rc, flow) + "\n\n---\n\n" +
-		"If, after reviewing the current code, this ticket's goal is already fully satisfied and no further changes are needed, " +
+	stageIdx := indexOf(flow.Stages, stage)
+	isLastStage := stageIdx == len(flow.Stages)-1
+
+	// A model told only "say so if nothing needs to change" doesn't reliably
+	// reach for that marker on a stage whose entire job is confirmation, not
+	// modification — it doesn't feel like "the ticket's goal" is its own
+	// accomplishment. Telling it explicitly that this is normal here (the
+	// same fix that made the reviewer's "no concerns" output reliable)
+	// closes that gap.
+	noChangesInstruction := "If, after reviewing the current code, this ticket's goal is already fully satisfied and no further changes are needed, " +
 		"say so explicitly under a section titled exactly \"## No Changes Needed\", explaining why — and do not modify any files. " +
 		"Only use this heading when you're certain nothing needs to change; if you make any edits, do not include it."
+	if len(flow.Stages) > 1 && isLastStage {
+		noChangesInstruction += " This is the final stage of a multi-stage ticket (" + strings.Join(flow.Stages, " → ") + ") — if your job here " +
+			"is only to confirm that earlier work already resolved the issue (e.g. running tests to verify, with no further code changes needed), " +
+			"that is a normal, common, and expected outcome. Say so under \"## No Changes Needed\" rather than leaving it ambiguous."
+	}
+	prompt := buildSystemPrompt(path, card, rc, flow) + "\n\n---\n\n" + noChangesInstruction
 
-	preexisting := untrackedFiles(projectRoot)
+	preexisting := untrackedFiles(workDir)
+	mainBefore, _ := git(projectRoot, "status", "--short")
 
-	output, agentErr, usedGit, timedOut := runAgentAttempt(prompt, projectRoot, rc.Command, rc.MaxDurationMinutes)
+	output, agentErr, usedGit, timedOut := runAgentAttempt(prompt, workDir, rc.Command, rc.MaxDurationMinutes)
+
+	if escErr := checkMainCheckoutUntouched(projectRoot, mainBefore); escErr != nil {
+		log.error("✋  Ticket #%s: %v — the agent likely escaped its worktree", id, escErr)
+		abandonAttempt(workDir, id, column, filename, preexisting)
+		transitionBlockedWithFindings(column, filename, "agent-escaped-worktree", escErr.Error())
+		return
+	}
 	if timedOut {
 		log.warn("⏱  Ticket #%s exceeded its %dm attempt budget", id, rc.MaxDurationMinutes)
-		abandonAttempt(projectRoot, id, column, filename, preexisting)
+		abandonAttempt(workDir, id, column, filename, preexisting)
 		transitionBudgetExhausted(column, filename, fmt.Sprintf("exceeded %dm attempt budget for role %q", rc.MaxDurationMinutes, card.Role))
 		return
 	}
 	if usedGit {
 		log.warn("✋  Ticket #%s used git directly — blocking", id)
-		abandonAttempt(projectRoot, id, column, filename, preexisting)
+		abandonAttempt(workDir, id, column, filename, preexisting)
 		transitionBlocked(column, filename, "agent-used-git")
 		return
 	}
@@ -477,22 +529,40 @@ func runTicket(cfg serve.Config, card model.Card) {
 	column, filename = current.Column, current.Filename
 	path = filepath.Join(kanbanRoot, column, filename)
 
-	stageIdx := indexOf(flow.Stages, stage)
-	isLastStage := stageIdx == len(flow.Stages)-1
 	expectVerifyFailure := goal == "bug" && stageIdx == 0
 
-	verr := runVerifyIn(cfg.Verify, projectRoot)
+	// A reviewer given only the ticket's full body and a diff has no way to
+	// know a multi-stage flow even exists — it judges the diff against the
+	// ticket's overall acceptance criteria regardless of which stage
+	// produced it, and flags "incomplete" work that a later stage was always
+	// going to finish. This context corrects that; single-stage flows (the
+	// common case) get an empty string and are unaffected.
+	stageContext := ""
+	if len(flow.Stages) > 1 {
+		if isLastStage {
+			stageContext = fmt.Sprintf(
+				"This ticket is worked in stages (%s); this diff is the final stage (%q, %d of %d), so it should fully satisfy the ticket's acceptance criteria below.\n\n",
+				strings.Join(flow.Stages, " → "), stage, stageIdx+1, len(flow.Stages))
+		} else {
+			stageContext = fmt.Sprintf(
+				"This ticket is worked in stages (%s); this diff is only stage %q (%d of %d) — later stages build on it. "+
+					"Do not expect the ticket's overall acceptance criteria to be met yet; only flag a concern about something actually wrong in the work done so far.\n\n",
+				strings.Join(flow.Stages, " → "), stage, stageIdx+1, len(flow.Stages))
+		}
+	}
+
+	verr := runVerifyIn(cfg.Verify, workDir)
 	verifyFailed := verr != nil
 
 	if expectVerifyFailure && !verifyFailed {
 		log.warn("✋  Ticket #%s could not reproduce the bug — verify passed at the reproduce stage", id)
-		commitCardWork(projectRoot, id, title, preexisting)
+		commitCardWork(workDir, id, title, preexisting)
 		transitionBlocked(column, filename, "could-not-reproduce")
 		return
 	}
 	if !expectVerifyFailure && verifyFailed {
 		log.warn("   Verify failed: %v", verr)
-		abandonAttempt(projectRoot, id, column, filename, preexisting)
+		abandonAttempt(workDir, id, column, filename, preexisting)
 		transitionBlocked(column, filename, "verify-failed")
 		return
 	}
@@ -500,20 +570,31 @@ func runTicket(cfg serve.Config, card model.Card) {
 	// Acceptance runs alongside verify, before the commit lands — the same
 	// reasoning as verify itself: checking it against a later state would
 	// make the result depend on whatever else landed in the meantime.
+	// Acceptance is documented as either a real command or descriptive
+	// prose (mcp/server.go) — acceptanceVerified only becomes true when it
+	// was actually run and passed, so prose behaves exactly like no
+	// acceptance at all rather than silently implying a verified done.
+	acceptanceVerified := false
 	if isLastStage && card.Acceptance != "" {
-		if err := runVerifyIn(card.Acceptance, projectRoot); err != nil {
-			log.warn("   Acceptance check failed: %v", err)
-			abandonAttempt(projectRoot, id, column, filename, preexisting)
-			transitionBlocked(column, filename, "acceptance-check-failed")
-			return
+		if err := runVerifyIn(card.Acceptance, workDir); err != nil {
+			if commandNotFound(err) {
+				log.info("   Acceptance field isn't a runnable command (exit 127) — treating it as descriptive criteria, not blocking: %q", card.Acceptance)
+			} else {
+				log.warn("   Acceptance check failed: %v", err)
+				abandonAttempt(workDir, id, column, filename, preexisting)
+				transitionBlocked(column, filename, "acceptance-check-failed")
+				return
+			}
+		} else {
+			acceptanceVerified = true
 		}
 	}
 
 	log.info("   Verify passed for ticket #%s — committing", id)
-	sha, commitErr := commitCardWork(projectRoot, id, title, preexisting)
+	sha, commitErr := commitCardWork(workDir, id, title, preexisting)
 	if commitErr != nil {
 		log.error("Failed to commit ticket #%s: %v", id, commitErr)
-		abandonAttempt(projectRoot, id, column, filename, preexisting)
+		abandonAttempt(workDir, id, column, filename, preexisting)
 		transitionBlocked(column, filename, "commit-failed")
 		return
 	}
@@ -522,7 +603,7 @@ func runTicket(cfg serve.Config, card model.Card) {
 	}
 	log.info("   Commit result: sha=%s (base_sha=%s)", previewSHA(sha), previewSHA(card.BaseSHA))
 
-	currentHead, headErr := git(projectRoot, "rev-parse", "HEAD")
+	currentHead, headErr := git(workDir, "rev-parse", "HEAD")
 	if headErr != nil {
 		log.error("Failed to resolve HEAD for ticket #%s's review diff: %v", id, headErr)
 		transitionBlocked(column, filename, "review-error")
@@ -544,7 +625,13 @@ func runTicket(cfg serve.Config, card model.Card) {
 				advanceStage(column, filename, flow.Stages[stageIdx+1], "no-changes-needed")
 				return
 			}
-			if card.Acceptance != "" || cfg.DoneOnCleanReview {
+			if err := mergeAndRemoveWorktree(projectRoot, id); err != nil {
+				log.error("Failed to merge ticket #%s's work into main: %v", id, err)
+				transitionBlocked(column, filename, "merge-not-fast-forward")
+				return
+			}
+			withCard(column, filename, func(c *model.Card) { c.Worktree = "" })
+			if acceptanceVerified || cfg.DoneOnCleanReview {
 				transitionDone(column, filename, "no-changes-needed", "no-changes-needed")
 				return
 			}
@@ -574,8 +661,9 @@ func runTicket(cfg serve.Config, card model.Card) {
 	}
 
 	ticketContent, _ := os.ReadFile(path)
+	reviewableContent := stripReviewFindings(string(ticketContent))
 	log.info("   Running reviewer for ticket #%s (diff=%d bytes, ticket content=%d bytes)", id, len(diff), len(ticketContent))
-	findings, revErr := runReviewer(cfg, string(ticketContent), diff)
+	findings, revErr := runReviewer(cfg, reviewableContent, diff, stageContext)
 	if revErr != nil {
 		log.error("Reviewer failed to run: %v", revErr)
 		transitionBlocked(column, filename, "review-error")
@@ -606,7 +694,7 @@ func runTicket(cfg serve.Config, card model.Card) {
 		}
 		if securityPathsMatch(touchedFiles, cfg.SecurityPaths) {
 			log.info("   Ticket #%s touches security-sensitive paths — running security review", id)
-			secFindings, secErr := runSecurityReviewer(cfg, string(ticketContent), diff)
+			secFindings, secErr := runSecurityReviewer(cfg, reviewableContent, diff, stageContext)
 			if secErr != nil {
 				log.error("Security reviewer failed to run: %v", secErr)
 				transitionBlocked(column, filename, "review-error")
@@ -635,7 +723,14 @@ func runTicket(cfg serve.Config, card model.Card) {
 		return
 	}
 
-	if card.Acceptance != "" || cfg.DoneOnCleanReview {
+	if err := mergeAndRemoveWorktree(projectRoot, id); err != nil {
+		log.error("Failed to merge ticket #%s's work into main: %v", id, err)
+		transitionBlocked(column, filename, "merge-not-fast-forward")
+		return
+	}
+	withCard(column, filename, func(c *model.Card) { c.Worktree = "" })
+
+	if acceptanceVerified || cfg.DoneOnCleanReview {
 		transitionDone(column, filename, "done:"+sha, "verify-green")
 		return
 	}

@@ -75,6 +75,7 @@ type Card struct {
 	AttemptRef   string    `yaml:"attempt_ref,omitempty" json:"attempt_ref"`
 	BaseSHA      string    `yaml:"base_sha,omitempty" json:"base_sha"`
 	Checkpoint   string    `yaml:"checkpoint,omitempty" json:"checkpoint"`
+	Worktree     string    `yaml:"worktree,omitempty" json:"worktree"`
 	Security     bool      `yaml:"security,omitempty" json:"security"`
 	Categories   []string  `yaml:"categories" json:"categories"`
 	Comments     []Comment `yaml:"comments" json:"comments"`
