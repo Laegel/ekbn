@@ -110,6 +110,7 @@ roles:
       - get_card
     command: opencode run -m opencode/big-pickle
     max_duration_minutes: 20
+    idle_timeout_minutes: 5
   reviewer:
     command: opencode run -m opencode/big-pickle
   security-reviewer:
