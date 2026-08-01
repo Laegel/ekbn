@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,24 +138,38 @@ func TestIsConcreteSecurityFinding(t *testing.T) {
 	})
 }
 
-func TestResolveRoleConfig(t *testing.T) {
-	roles := map[string]serve.RoleConfig{
-		"default":  {Prompt: "You are a general-purpose agent."},
-		"frontend": {Prompt: "You are a frontend specialist."},
+func TestResolveExecutor(t *testing.T) {
+	cfg := serve.Config{
+		Executors: map[string]serve.ExecutorConfig{
+			"main": {Command: "opencode run"},
+		},
+		Roles: map[string]serve.RoleConfig{
+			"default":  {Prompt: "You are a general-purpose agent.", Executor: "main"},
+			"frontend": {Prompt: "You are a frontend specialist.", Executor: "main"},
+		},
 	}
 
 	t.Run("known role", func(t *testing.T) {
-		rc, fellBack := resolveRoleConfig("frontend", roles)
+		ec, rc, fellBack, err := serve.ResolveExecutor("frontend", cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if fellBack {
 			t.Error("fellBack = true, want false for a known role")
 		}
 		if rc.Prompt != "You are a frontend specialist." {
 			t.Errorf("rc.Prompt = %q, want the frontend prompt", rc.Prompt)
 		}
+		if ec.Command != "opencode run" {
+			t.Errorf("ec.Command = %q, want the resolved executor's command", ec.Command)
+		}
 	})
 
 	t.Run("unknown role falls back to default", func(t *testing.T) {
-		rc, fellBack := resolveRoleConfig("nonexistent-role", roles)
+		_, rc, fellBack, err := serve.ResolveExecutor("nonexistent-role", cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !fellBack {
 			t.Error("fellBack = false, want true for an unknown role")
 		}
@@ -164,7 +179,10 @@ func TestResolveRoleConfig(t *testing.T) {
 	})
 
 	t.Run("empty role falls back to default", func(t *testing.T) {
-		rc, fellBack := resolveRoleConfig("", roles)
+		_, rc, fellBack, err := serve.ResolveExecutor("", cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !fellBack {
 			t.Error("fellBack = false, want true for an unset role")
 		}
@@ -174,12 +192,30 @@ func TestResolveRoleConfig(t *testing.T) {
 	})
 
 	t.Run("no roles configured preserves current behavior", func(t *testing.T) {
-		rc, fellBack := resolveRoleConfig("frontend", map[string]serve.RoleConfig{})
+		ec, rc, fellBack, err := serve.ResolveExecutor("frontend", serve.Config{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if fellBack {
 			t.Error("fellBack = true, want false when roles is unconfigured entirely")
 		}
 		if rc.Prompt != "" || len(rc.Tools) != 0 || len(rc.Skills) != 0 {
 			t.Errorf("rc = %+v, want zero value when roles is unconfigured", rc)
+		}
+		if ec.Command != "" {
+			t.Errorf("ec.Command = %q, want empty when roles is unconfigured", ec.Command)
+		}
+	})
+
+	t.Run("role names an unconfigured executor", func(t *testing.T) {
+		badCfg := serve.Config{
+			Roles: map[string]serve.RoleConfig{
+				"backend": {Executor: "nonexistent-executor"},
+			},
+		}
+		_, _, _, err := serve.ResolveExecutor("backend", badCfg)
+		if !errors.Is(err, serve.ErrUnknownExecutor) {
+			t.Errorf("err = %v, want ErrUnknownExecutor", err)
 		}
 	})
 }

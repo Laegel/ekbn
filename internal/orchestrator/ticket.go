@@ -40,24 +40,6 @@ func (a *activityWriter) idleFor() time.Duration {
 // real, minutes-scale production idleTimeout values.
 const idleWatchdogInterval = 200 * time.Millisecond
 
-// resolveRoleConfig looks up role in roles, falling back to roles["default"]
-// (reporting fellBack=true) when role is unset or not a configured key.
-// Routing is a lookup, not a judgment: no model is ever asked which
-// specialist to use. If roles is empty entirely (unconfigured), returns a
-// zero-value RoleConfig with fellBack=false, preserving pre-role-routing
-// behavior exactly.
-func resolveRoleConfig(role string, roles map[string]serve.RoleConfig) (rc serve.RoleConfig, fellBack bool) {
-	if len(roles) == 0 {
-		return serve.RoleConfig{}, false
-	}
-	if role != "" {
-		if found, ok := roles[role]; ok {
-			return found, false
-		}
-	}
-	return roles["default"], true
-}
-
 func buildSystemPrompt(ticketPath string, card model.Card, rc serve.RoleConfig, flow serve.StageFlow) string {
 	var parts []string
 	if data, err := os.ReadFile(agentsMD); err == nil {
@@ -543,7 +525,12 @@ func runTicket(cfg serve.Config, card model.Card) {
 		return
 	}
 
-	rc, fellBack := resolveRoleConfig(card.Role, cfg.Roles)
+	ec, rc, fellBack, resolveErr := serve.ResolveExecutor(card.Role, cfg)
+	if resolveErr != nil {
+		log.warn("✗  Ticket #%s: %v — blocking", id, resolveErr)
+		transitionBlocked(column, filename, "unknown-executor")
+		return
+	}
 	if fellBack {
 		if card.Role == "" {
 			log.warn("Ticket #%s has no role set — using default agent", id)
@@ -551,7 +538,7 @@ func runTicket(cfg serve.Config, card model.Card) {
 			log.warn("Ticket #%s has role %q, which is not configured — using default agent", id, card.Role)
 		}
 	}
-	if strings.TrimSpace(rc.Command) == "" {
+	if strings.TrimSpace(ec.Command) == "" {
 		log.warn("✗  Ticket #%s: no agent command configured for role %q — blocking", id, orDefault(card.Role, "default"))
 		transitionBlocked(column, filename, "no-agent-command-configured")
 		return
@@ -580,8 +567,8 @@ func runTicket(cfg serve.Config, card model.Card) {
 	mainBefore, _ := git(projectRoot, "status", "--short")
 	mainCheckoutMu.Unlock()
 
-	output, agentErr, usedGit, usedGitCmd, timedOut, idleTimedOut := runAgentAttempt(prompt, workDir, rc.Command,
-		time.Duration(rc.MaxDurationMinutes)*time.Minute, time.Duration(rc.IdleTimeoutMinutes)*time.Minute)
+	output, agentErr, usedGit, usedGitCmd, timedOut, idleTimedOut := runAgentAttempt(prompt, workDir, ec.Command,
+		time.Duration(ec.MaxDurationMinutes)*time.Minute, time.Duration(ec.IdleTimeoutMinutes)*time.Minute)
 
 	mainCheckoutMu.Lock()
 	escErr := checkMainCheckoutUntouched(projectRoot, mainBefore)
@@ -604,20 +591,20 @@ func runTicket(cfg serve.Config, card model.Card) {
 			abandonAttempt(workDir, id, column, filename, preexisting)
 			transitionBlockedWithFindings(column, filename, "agent-idle-rounds-exhausted",
 				fmt.Sprintf("The agent produced no output for %d minutes and was killed, on every attempt up to this stage's %d-round budget. Its last output before stalling:\n\n%s",
-					rc.IdleTimeoutMinutes, flow.MaxRounds, previewText(output, 2000)))
+					ec.IdleTimeoutMinutes, flow.MaxRounds, previewText(output, 2000)))
 			return
 		}
-		log.warn("💤  Ticket #%s's agent produced no output for %dm — treating as stalled (attempt %d/%d), retrying", id, rc.IdleTimeoutMinutes, round, flow.MaxRounds)
+		log.warn("💤  Ticket #%s's agent produced no output for %dm — treating as stalled (attempt %d/%d), retrying", id, ec.IdleTimeoutMinutes, round, flow.MaxRounds)
 		abandonAttempt(workDir, id, column, filename, preexisting)
 		cycleForReview(column, filename, round,
 			fmt.Sprintf("Attempt %d was killed after producing no output for %d minutes — likely stalled; retrying automatically. Its last output before stalling:\n\n%s",
-				round, rc.IdleTimeoutMinutes, previewText(output, 2000)))
+				round, ec.IdleTimeoutMinutes, previewText(output, 2000)))
 		return
 	}
 	if timedOut {
-		log.warn("⏱  Ticket #%s exceeded its %dm attempt budget", id, rc.MaxDurationMinutes)
+		log.warn("⏱  Ticket #%s exceeded its %dm attempt budget", id, ec.MaxDurationMinutes)
 		abandonAttempt(workDir, id, column, filename, preexisting)
-		transitionBudgetExhausted(column, filename, fmt.Sprintf("exceeded %dm attempt budget for role %q", rc.MaxDurationMinutes, card.Role))
+		transitionBudgetExhausted(column, filename, fmt.Sprintf("exceeded %dm attempt budget for role %q", ec.MaxDurationMinutes, card.Role))
 		return
 	}
 	if usedGit {
@@ -885,11 +872,16 @@ func runTicket(cfg serve.Config, card model.Card) {
 // the tree.
 func runSpike(cfg serve.Config, path, column, filename string, card model.Card, projectRoot string) {
 	id := orDefault(card.ID, "???")
-	rc, fellBack := resolveRoleConfig(card.Role, cfg.Roles)
+	ec, rc, fellBack, resolveErr := serve.ResolveExecutor(card.Role, cfg)
+	if resolveErr != nil {
+		log.warn("✗  Spike #%s: %v — blocking", id, resolveErr)
+		transitionBlocked(column, filename, "unknown-executor")
+		return
+	}
 	if fellBack {
 		log.warn("Ticket #%s (spike) has no matching role — using default agent", id)
 	}
-	if strings.TrimSpace(rc.Command) == "" {
+	if strings.TrimSpace(ec.Command) == "" {
 		log.warn("✗  Spike #%s: no agent command configured for role %q — blocking", id, orDefault(card.Role, "default"))
 		transitionBlocked(column, filename, "no-agent-command-configured")
 		return
@@ -898,8 +890,8 @@ func runSpike(cfg serve.Config, path, column, filename string, card model.Card, 
 
 	preexisting := untrackedFiles(projectRoot)
 
-	output, agentErr, usedGit, usedGitCmd, timedOut, idleTimedOut := runAgentAttempt(prompt, projectRoot, rc.Command,
-		time.Duration(rc.MaxDurationMinutes)*time.Minute, time.Duration(rc.IdleTimeoutMinutes)*time.Minute)
+	output, agentErr, usedGit, usedGitCmd, timedOut, idleTimedOut := runAgentAttempt(prompt, projectRoot, ec.Command,
+		time.Duration(ec.MaxDurationMinutes)*time.Minute, time.Duration(ec.IdleTimeoutMinutes)*time.Minute)
 	if idleTimedOut {
 		round := card.Round + 1
 		flow := cfg.FlowFor("spike")
@@ -907,19 +899,19 @@ func runSpike(cfg serve.Config, path, column, filename string, card model.Card, 
 			resetWorkingTree(projectRoot, preexisting)
 			transitionBlockedWithFindings(column, filename, "agent-idle-rounds-exhausted",
 				fmt.Sprintf("The agent produced no output for %d minutes and was killed. Its last output before stalling:\n\n%s",
-					rc.IdleTimeoutMinutes, previewText(output, 2000)))
+					ec.IdleTimeoutMinutes, previewText(output, 2000)))
 			return
 		}
-		log.warn("💤  Spike #%s's agent produced no output for %dm — treating as stalled (attempt %d/%d), retrying", id, rc.IdleTimeoutMinutes, round, flow.MaxRounds)
+		log.warn("💤  Spike #%s's agent produced no output for %dm — treating as stalled (attempt %d/%d), retrying", id, ec.IdleTimeoutMinutes, round, flow.MaxRounds)
 		resetWorkingTree(projectRoot, preexisting)
 		cycleForReview(column, filename, round,
 			fmt.Sprintf("Attempt %d was killed after producing no output for %d minutes — likely stalled; retrying automatically. Its last output before stalling:\n\n%s",
-				round, rc.IdleTimeoutMinutes, previewText(output, 2000)))
+				round, ec.IdleTimeoutMinutes, previewText(output, 2000)))
 		return
 	}
 	if timedOut {
 		resetWorkingTree(projectRoot, preexisting)
-		transitionBudgetExhausted(column, filename, fmt.Sprintf("exceeded %dm attempt budget for role %q", rc.MaxDurationMinutes, card.Role))
+		transitionBudgetExhausted(column, filename, fmt.Sprintf("exceeded %dm attempt budget for role %q", ec.MaxDurationMinutes, card.Role))
 		return
 	}
 	if usedGit {

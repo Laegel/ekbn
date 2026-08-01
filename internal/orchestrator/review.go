@@ -100,12 +100,15 @@ func runReviewSession(prompt, command string) (output string, err error) {
 // to run and reviewing is optional infrastructure, not something ekbn can
 // force without one.
 func runReviewer(cfg serve.Config, ticketContent, diff, stageContext string) (findings string, err error) {
-	rc, _ := resolveRoleConfig("reviewer", cfg.Roles)
-	if strings.TrimSpace(rc.Command) == "" {
+	ec, _, _, resolveErr := serve.ResolveExecutor("reviewer", cfg)
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	if strings.TrimSpace(ec.Command) == "" {
 		log.info("No reviewer command configured — skipping general review")
 		return "", nil
 	}
-	return runReviewSession(buildReviewPrompt(ticketContent, diff, stageContext), rc.Command)
+	return runReviewSession(buildReviewPrompt(ticketContent, diff, stageContext), ec.Command)
 }
 
 // buildSecurityReviewPrompt requires an exact reproduction, not advice — see
@@ -135,10 +138,13 @@ func isConcreteSecurityFinding(output string) bool {
 // runSecurityReviewer runs the security review gate. Same skip-if-unconfigured
 // policy as runReviewer.
 func runSecurityReviewer(cfg serve.Config, ticketContent, diff, stageContext string) (findings string, err error) {
-	rc, _ := resolveRoleConfig("security-reviewer", cfg.Roles)
-	if strings.TrimSpace(rc.Command) == "" {
+	ec, _, _, resolveErr := serve.ResolveExecutor("security-reviewer", cfg)
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	if strings.TrimSpace(ec.Command) == "" {
 		log.info("No security-reviewer command configured — skipping security review")
 		return "", nil
 	}
-	return runReviewSession(buildSecurityReviewPrompt(ticketContent, diff, stageContext), rc.Command)
+	return runReviewSession(buildSecurityReviewPrompt(ticketContent, diff, stageContext), ec.Command)
 }

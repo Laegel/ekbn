@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"ekbn/internal/serve"
 	"ekbn/model"
 )
 
@@ -293,22 +292,11 @@ func fileExistsForTest(path string) bool {
 	return err == nil
 }
 
-func TestResolveCommand(t *testing.T) {
-	roles := map[string]serve.RoleConfig{
-		"default": {Command: "opencode run -m default/model"},
-		"specify": {Command: "opencode run -m specify/model"},
-	}
-
-	if got := resolveCommand(roles, "specify"); got != "opencode run -m specify/model" {
-		t.Errorf("resolveCommand(specify) = %q, want the specify-specific command", got)
-	}
-	if got := resolveCommand(roles, "reviewer"); got != "opencode run -m default/model" {
-		t.Errorf("resolveCommand(reviewer) = %q, want it to fall back to default", got)
-	}
-	if got := resolveCommand(nil, "specify"); got != "" {
-		t.Errorf("resolveCommand with no roles configured = %q, want empty", got)
-	}
-}
+// Role/executor resolution itself (fallback-to-default, unknown-executor
+// error) is tested once, at its single shared definition:
+// internal/orchestrator.TestResolveExecutor. This package only needs to
+// confirm Run actually uses it — see TestRun_FailsFastWithNoCommandConfigured
+// below.
 
 func TestRun_FailsFastWithNoCommandConfigured(t *testing.T) {
 	dir := t.TempDir()

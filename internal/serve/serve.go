@@ -2,6 +2,7 @@ package serve
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -20,32 +21,43 @@ import (
 	"ekbn/model"
 )
 
-// RoleConfig configures the agent invocation for one role. Command is the
-// full command line to run for this role — ekbn has no built-in agent CLI:
-// it splits Command into argv, appends the prompt as the final argument, and
-// execs it. An empty Command means nothing is invoked for that role at all;
-// ekbn never assumes or falls back to any particular CLI. Command and
-// MaxDurationMinutes are per-role, not global: a reviewer role can run a
-// smaller/faster model with a tighter time budget than an implementer role.
-// MaxDurationMinutes is enforced by the orchestrator killing the subprocess
-// (see runAgentAttempt) — that is the one budget dimension ekbn can enforce
-// itself without depending on any particular CLI's own accounting.
+// ExecutorConfig is a named, reusable agent CLI invocation — how a role's
+// work actually gets run, kept separate from what capability the role
+// represents. Command is the full command line to run — ekbn has no
+// built-in agent CLI: it splits Command into argv, appends the prompt as
+// the final argument, and execs it. MaxDurationMinutes is enforced by the
+// orchestrator killing the subprocess (see runAgentAttempt) — the one
+// budget dimension ekbn can enforce itself without depending on any
+// particular CLI's own accounting. IdleTimeoutMinutes kills the agent early
+// if it produces no new output (nothing written to stdout/stderr) for this
+// many minutes — distinct from MaxDurationMinutes, which caps total runtime
+// regardless of whether the process is actively working. A CLI that stalls
+// (goes silent without crashing or finishing) is treated as a transient
+// glitch worth retrying, the same bounded way a reviewer's findings cycle a
+// ticket back for another attempt; a genuine MaxDurationMinutes timeout
+// still goes straight to budget-exhausted for a human. 0/unset disables
+// idle detection, the same convention as MaxDurationMinutes.
+type ExecutorConfig struct {
+	Command            string `yaml:"command"`
+	MaxDurationMinutes int    `yaml:"max_duration_minutes"`
+	IdleTimeoutMinutes int    `yaml:"idle_timeout_minutes"`
+}
+
+// RoleConfig defines a capability (what the agent should do and with what
+// prompt/tools/skills), not an identity — it names an Executor rather than
+// embedding a command line itself, so today's opencode-backed "backend"
+// role can point at a different CLI tomorrow without becoming a different
+// role. MaxDurationMinutes/IdleTimeoutMinutes here are optional overrides:
+// unset (0) falls back to the referenced Executor's own values, letting one
+// role run a tighter or looser budget on a shared executor without
+// duplicating its command line.
 type RoleConfig struct {
 	Prompt             string   `yaml:"prompt"`
 	Tools              []string `yaml:"tools"`
 	Skills             []string `yaml:"skills"`
-	Command            string   `yaml:"command"`
-	MaxDurationMinutes int      `yaml:"max_duration_minutes"`
-	// IdleTimeoutMinutes kills the agent early if it produces no new output
-	// (nothing written to stdout/stderr) for this many minutes — distinct
-	// from MaxDurationMinutes, which caps total runtime regardless of
-	// whether the process is actively working. A CLI that stalls (goes
-	// silent without crashing or finishing) is treated as a transient
-	// glitch worth retrying, the same bounded way a reviewer's findings
-	// cycle a ticket back for another attempt; a genuine MaxDurationMinutes
-	// timeout still goes straight to budget-exhausted for a human. 0/unset
-	// disables idle detection, the same convention as MaxDurationMinutes.
-	IdleTimeoutMinutes int `yaml:"idle_timeout_minutes"`
+	Executor           string   `yaml:"executor"`
+	MaxDurationMinutes int      `yaml:"max_duration_minutes,omitempty"`
+	IdleTimeoutMinutes int      `yaml:"idle_timeout_minutes,omitempty"`
 }
 
 // StageFlow is a stage sequence keyed by goal, not written into each item:
@@ -67,14 +79,15 @@ var defaultFlows = map[string]StageFlow{
 const defaultWIPLimit = 1
 
 type Config struct {
-	Theme         string                `yaml:"theme"`
-	FolderName    string                `yaml:"folder-name"`
-	Port          int                   `yaml:"port"`
-	Prompt        string                `yaml:"prompt"`
-	Verify        string                `yaml:"verify"`
-	Roles         map[string]RoleConfig `yaml:"roles"`
-	SecurityPaths []string              `yaml:"security-paths"`
-	Flows         map[string]StageFlow  `yaml:"flows"`
+	Theme         string                    `yaml:"theme"`
+	FolderName    string                    `yaml:"folder-name"`
+	Port          int                       `yaml:"port"`
+	Prompt        string                    `yaml:"prompt"`
+	Verify        string                    `yaml:"verify"`
+	Executors     map[string]ExecutorConfig `yaml:"executors"`
+	Roles         map[string]RoleConfig     `yaml:"roles"`
+	SecurityPaths []string                  `yaml:"security-paths"`
+	Flows         map[string]StageFlow      `yaml:"flows"`
 	// WIPLimit caps how many tickets the orchestrator runs at once. Each
 	// ticket gets its own git worktree/branch, so concurrent tickets are
 	// isolated from each other; merging back into main handles a sibling
@@ -89,6 +102,53 @@ type Config struct {
 	// guarantee as "a human confirmed this is right," so this is an explicit
 	// trade a project opts into, not silently assumed.
 	DoneOnCleanReview bool `yaml:"done-on-clean-review"`
+}
+
+// ErrUnknownExecutor is returned by ResolveExecutor when a role names an
+// executor that isn't configured — a real config mistake, distinct from a
+// role simply having no executor set at all (which just means nothing is
+// invoked for it, same as an empty Command meant before executors existed).
+var ErrUnknownExecutor = errors.New("role references an unconfigured executor")
+
+// ResolveExecutor looks up role in roles (falling back to roles["default"],
+// reporting fellBack=true) and resolves its named Executor, applying the
+// role's own MaxDurationMinutes/IdleTimeoutMinutes as overrides when set.
+// This is the one place role-with-executor resolution happens — both the
+// orchestrator and specify used to duplicate this lookup-with-fallback
+// logic separately (once for a role's Command, once for its own copy of the
+// same fallback rule); now there's a single definition. If roles is empty
+// entirely (unconfigured), returns zero values with fellBack=false,
+// preserving pre-executor behavior exactly (an empty Command downstream
+// meant "nothing configured," not an error). A role naming an executor that
+// isn't in cfg.Executors is ErrUnknownExecutor — a real mistake to surface,
+// not something to silently fall back from.
+func ResolveExecutor(role string, cfg Config) (ec ExecutorConfig, rc RoleConfig, fellBack bool, err error) {
+	if len(cfg.Roles) == 0 {
+		return ExecutorConfig{}, RoleConfig{}, false, nil
+	}
+	if role != "" {
+		if found, ok := cfg.Roles[role]; ok {
+			rc = found
+		} else {
+			rc, fellBack = cfg.Roles["default"], true
+		}
+	} else {
+		rc, fellBack = cfg.Roles["default"], true
+	}
+	if rc.Executor == "" {
+		return ExecutorConfig{}, rc, fellBack, nil
+	}
+	ec, ok := cfg.Executors[rc.Executor]
+	if !ok {
+		return ExecutorConfig{}, rc, fellBack, fmt.Errorf("%w: %q", ErrUnknownExecutor, rc.Executor)
+	}
+	if rc.MaxDurationMinutes > 0 {
+		ec.MaxDurationMinutes = rc.MaxDurationMinutes
+	}
+	if rc.IdleTimeoutMinutes > 0 {
+		ec.IdleTimeoutMinutes = rc.IdleTimeoutMinutes
+	}
+	return ec, rc, fellBack, nil
 }
 
 // FlowFor returns the stage flow for goal, falling back to defaultFlows when
@@ -138,6 +198,9 @@ func LoadConfig() Config {
 	}
 	if parsed.Verify != "" {
 		cfg.Verify = parsed.Verify
+	}
+	if len(parsed.Executors) > 0 {
+		cfg.Executors = parsed.Executors
 	}
 	if len(parsed.Roles) > 0 {
 		cfg.Roles = parsed.Roles

@@ -37,7 +37,8 @@ func fixSetup(t *testing.T, verify string) string {
 // fakeAgentAndReviewer), distinguished by a marker argument the shim itself
 // checks — "implement" vs "review" — since that's now entirely up to
 // whatever command each role configures, not a flag ekbn adds.
-const testRolesConfig = "roles:\n  default:\n    command: opencode implement\n  reviewer:\n    command: opencode review\n"
+const testRolesConfig = "executors:\n  implement-exec:\n    command: opencode implement\n  review-exec:\n    command: opencode review\n" +
+	"roles:\n  default:\n    executor: implement-exec\n  reviewer:\n    executor: review-exec\n"
 
 // fakeAgentAndReviewer installs an "opencode" shim on PATH serving both
 // configured roles (see testRolesConfig). In implement mode ($1 ==
@@ -932,7 +933,8 @@ const idleStallAgentBody = "  sleep 90"
 // prove the actual config -> kill -> retry path, on top of the fast,
 // sub-second unit test of the watchdog mechanism itself
 // (TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall).
-const idleTimeoutRoleConfig = "roles:\n  default:\n    command: opencode implement\n    idle_timeout_minutes: 1\n  reviewer:\n    command: opencode review\n"
+const idleTimeoutRoleConfig = "executors:\n  implement-exec:\n    command: opencode implement\n  review-exec:\n    command: opencode review\n" +
+	"roles:\n  default:\n    executor: implement-exec\n    idle_timeout_minutes: 1\n  reviewer:\n    executor: review-exec\n"
 
 // TestFix_IdleStallCyclesBackToTodo confirms a stalled agent (no output at
 // all) is treated as a transient glitch worth retrying — cycling back to

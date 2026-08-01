@@ -104,9 +104,13 @@ func Run(ctx context.Context, opts Options, out io.Writer) error {
 
 	cfg := serve.LoadConfig()
 	roleNames := configuredRoleNames(cfg.Roles)
-	command := resolveCommand(cfg.Roles, "specify")
+	ec, _, _, err := serve.ResolveExecutor("specify", cfg)
+	if err != nil {
+		return err
+	}
+	command := ec.Command
 	if strings.TrimSpace(command) == "" {
-		return fmt.Errorf("no command configured — set roles.specify.command or roles.default.command in ekbn.config.yml")
+		return fmt.Errorf("no command configured — set roles.specify.executor or roles.default.executor in ekbn.config.yml")
 	}
 
 	var firstErr error
@@ -116,17 +120,6 @@ func Run(ctx context.Context, opts Options, out io.Writer) error {
 		}
 	}
 	return firstErr
-}
-
-// resolveCommand looks up role in roles, falling back to roles["default"] —
-// the same lookup semantics internal/orchestrator's resolveRoleConfig uses,
-// duplicated here rather than shared across packages for one field. Returns
-// "" if neither is configured; callers treat that as "nothing to invoke."
-func resolveCommand(roles map[string]serve.RoleConfig, role string) string {
-	if rc, ok := roles[role]; ok && strings.TrimSpace(rc.Command) != "" {
-		return rc.Command
-	}
-	return roles["default"].Command
 }
 
 // resolveSpecArgs unifies the two accepted forms of spec input: file paths
