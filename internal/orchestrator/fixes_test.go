@@ -802,6 +802,30 @@ func TestFix_ReviewerGetsNoStageContextForSingleStageFlow(t *testing.T) {
 	}
 }
 
+// TestFix_BuildSystemPromptFallsBackToDotAgentsDir guards against a real
+// gap: AGENTS.md is a common enough convention to live at the project root,
+// but .agents/AGENTS.md is also common, and ekbn only ever checked the
+// former — silently running every ticket without base instructions for any
+// project using the latter layout, with nothing but a log line to notice.
+func TestFix_BuildSystemPromptFallsBackToDotAgentsDir(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origWd) })
+
+	if err := os.Mkdir(".agents", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(".agents", "AGENTS.md"), []byte("project base instructions"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt := buildSystemPrompt("card.md", model.Card{}, serve.RoleConfig{}, serve.StageFlow{})
+	if !strings.Contains(prompt, "project base instructions") {
+		t.Errorf("prompt should fall back to .agents/AGENTS.md when AGENTS.md is absent, got: %q", prompt)
+	}
+}
+
 // TestFix_NoChangesNeededInstructionIsStageAware guards against a real bug:
 // the implementer's final stage often has nothing left to change (earlier
 // stages already did the work), but a generic "say so if nothing needs to

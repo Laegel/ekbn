@@ -20,12 +20,16 @@ import (
 )
 
 const (
-	pollInterval  = 150
-	kanbanRoot    = ".kanban"
-	logFile       = ".kanban/orchestrator.log"
-	agentsMD      = "AGENTS.md"
-	securityMD    = "SECURITY.md"
-	leaseDuration = 30 * time.Minute
+	pollInterval = 150
+	kanbanRoot   = ".kanban"
+	logFile      = ".kanban/orchestrator.log"
+	agentsMD     = "AGENTS.md"
+	// agentsMDFallback is checked if agentsMD isn't found at the project
+	// root — .agents/AGENTS.md is a common enough convention that ekbn
+	// shouldn't force every project onto a single fixed layout.
+	agentsMDFallback = ".agents/AGENTS.md"
+	securityMD       = "SECURITY.md"
+	leaseDuration    = 30 * time.Minute
 )
 
 // logger opens its file lazily, on first actual log call, rather than at

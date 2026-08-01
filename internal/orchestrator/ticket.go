@@ -62,8 +62,10 @@ func buildSystemPrompt(ticketPath string, card model.Card, rc serve.RoleConfig, 
 	var parts []string
 	if data, err := os.ReadFile(agentsMD); err == nil {
 		parts = append(parts, string(data))
+	} else if data, err := os.ReadFile(agentsMDFallback); err == nil {
+		parts = append(parts, string(data))
 	} else {
-		log.warn("AGENTS.md not found — agent will run without base instructions")
+		log.warn("AGENTS.md not found (checked %s and %s) — agent will run without base instructions", agentsMD, agentsMDFallback)
 	}
 	if rc.Prompt != "" {
 		parts = append(parts, rc.Prompt)
