@@ -54,35 +54,42 @@ func IsValidStatus(s Status) bool {
 }
 
 type Card struct {
-	ID           string    `yaml:"id" json:"id"`
-	Title        string    `yaml:"title" json:"title"`
-	Author       string    `yaml:"author" json:"author"`
-	Created      string    `yaml:"created" json:"created"`
-	Updated      string    `yaml:"updated" json:"updated"`
-	Priority     int       `yaml:"priority" json:"priority"`
-	Role         string    `yaml:"role" json:"role"`
-	Goal         string    `yaml:"goal" json:"goal"`
-	Spec         string    `yaml:"spec" json:"spec"`
-	Status       Status    `yaml:"status" json:"status"`
-	Stage        string    `yaml:"stage" json:"stage"`
-	Round        int       `yaml:"round" json:"round"`
-	Acceptance   string    `yaml:"acceptance" json:"acceptance"`
-	DependsOn    []string  `yaml:"depends_on" json:"depends_on"`
-	Unresolved   string    `yaml:"unresolved,omitempty" json:"unresolved"`
-	Reason       string    `yaml:"reason" json:"reason"`
-	Outcome      Outcome   `yaml:"outcome,omitempty" json:"outcome"`
-	LeaseOwner   string    `yaml:"lease_owner,omitempty" json:"lease_owner"`
-	LeaseExpires string    `yaml:"lease_expires,omitempty" json:"lease_expires"`
-	AttemptRef   string    `yaml:"attempt_ref,omitempty" json:"attempt_ref"`
-	BaseSHA      string    `yaml:"base_sha,omitempty" json:"base_sha"`
-	Checkpoint   string    `yaml:"checkpoint,omitempty" json:"checkpoint"`
-	Worktree     string    `yaml:"worktree,omitempty" json:"worktree"`
-	Security     bool      `yaml:"security,omitempty" json:"security"`
-	Categories   []string  `yaml:"categories" json:"categories"`
-	Comments     []Comment `yaml:"comments" json:"comments"`
-	Content      string    `yaml:"-" json:"content"`
-	Filename     string    `yaml:"-" json:"filename"`
-	Column       string    `yaml:"-" json:"column"`
+	ID       string `yaml:"id" json:"id"`
+	Title    string `yaml:"title" json:"title"`
+	Author   string `yaml:"author" json:"author"`
+	Created  string `yaml:"created" json:"created"`
+	Updated  string `yaml:"updated" json:"updated"`
+	Priority int    `yaml:"priority" json:"priority"`
+	Role     string `yaml:"role" json:"role"`
+	Goal     string `yaml:"goal" json:"goal"`
+	Spec     string `yaml:"spec" json:"spec"`
+	Status   Status `yaml:"status" json:"status"`
+	Stage    string `yaml:"stage" json:"stage"`
+	Round    int    `yaml:"round" json:"round"`
+	// TotalAttempts counts every transition taken this ticket run,
+	// regardless of which state — the circuit breaker for a ping-pong loop
+	// between two or more states, none of which individually exceeds its
+	// own per-state Round/MaxAttempts cap (each resets to 0 on re-entry).
+	// Reset only by a full reset (ekbn reset-blocked), not by a normal
+	// stage transition.
+	TotalAttempts int       `yaml:"total_attempts,omitempty" json:"total_attempts"`
+	Acceptance    string    `yaml:"acceptance" json:"acceptance"`
+	DependsOn     []string  `yaml:"depends_on" json:"depends_on"`
+	Unresolved    string    `yaml:"unresolved,omitempty" json:"unresolved"`
+	Reason        string    `yaml:"reason" json:"reason"`
+	Outcome       Outcome   `yaml:"outcome,omitempty" json:"outcome"`
+	LeaseOwner    string    `yaml:"lease_owner,omitempty" json:"lease_owner"`
+	LeaseExpires  string    `yaml:"lease_expires,omitempty" json:"lease_expires"`
+	AttemptRef    string    `yaml:"attempt_ref,omitempty" json:"attempt_ref"`
+	BaseSHA       string    `yaml:"base_sha,omitempty" json:"base_sha"`
+	Checkpoint    string    `yaml:"checkpoint,omitempty" json:"checkpoint"`
+	Worktree      string    `yaml:"worktree,omitempty" json:"worktree"`
+	Security      bool      `yaml:"security,omitempty" json:"security"`
+	Categories    []string  `yaml:"categories" json:"categories"`
+	Comments      []Comment `yaml:"comments" json:"comments"`
+	Content       string    `yaml:"-" json:"content"`
+	Filename      string    `yaml:"-" json:"filename"`
+	Column        string    `yaml:"-" json:"column"`
 }
 
 type Column struct {

@@ -13,8 +13,9 @@ import (
 )
 
 // fixSetup builds a temp git repo with the kanban columns and a config using
-// a single-stage "feature" flow (so a ticket reaches its terminal state in
-// one runTicket call) and the given verify command. Returns the repo dir.
+// the default "feature" flow (implement -> verify -> review -> done/blocked,
+// see internal/serve/serve.go's defaultFlows) and the given verify command.
+// Returns the repo dir.
 func fixSetup(t *testing.T, verify string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -25,7 +26,6 @@ func fixSetup(t *testing.T, verify string) string {
 	initGitRepo(t)
 	cfg := "verify: \"" + verify + "\"\n" +
 		"wip-limit: 1\n" +
-		"flows:\n  feature:\n    stages: [work]\n    max_rounds: 2\n" +
 		testRolesConfig
 	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
 	ensureKanbanDirs()
@@ -114,30 +114,76 @@ func mustReadCard(t *testing.T, path string) model.Card {
 	return card
 }
 
-func TestFix_SuccessAdvancesToReview(t *testing.T) {
+// runUntilSettled calls runCycle repeatedly (up to maxCycles times) until
+// ticket id is no longer todo or in-progress — i.e. it reached a terminal or
+// paused state (done/blocked/budget-exhausted). A ticket's flow can now
+// visit a different number of states depending on its path (retries, review
+// rounds), so tests express "let it run to completion" this way instead of
+// hand-counting cycles.
+func runUntilSettled(t *testing.T, cfg serve.Config, id string, maxCycles int) model.Card {
+	t.Helper()
+	for i := 0; i < maxCycles; i++ {
+		if card, ok := findCard(id); ok && card.Status != model.StatusTodo && card.Status != model.StatusInProgress {
+			return card
+		}
+		runCycle(cfg)
+	}
+	card, ok := findCard(id)
+	if !ok {
+		t.Fatalf("ticket #%s not found after %d cycles", id, maxCycles)
+	}
+	t.Fatalf("ticket #%s did not settle within %d cycles (status=%s stage=%s)", id, maxCycles, card.Status, card.Stage)
+	return card
+}
+
+// runUntilAllSettled is runUntilSettled for several tickets running
+// concurrently under the same WIP limit.
+func runUntilAllSettled(t *testing.T, cfg serve.Config, ids []string, maxCycles int) {
+	t.Helper()
+	for i := 0; i < maxCycles; i++ {
+		allSettled := true
+		for _, id := range ids {
+			card, ok := findCard(id)
+			if !ok || card.Status == model.StatusTodo || card.Status == model.StatusInProgress {
+				allSettled = false
+				break
+			}
+		}
+		if allSettled {
+			return
+		}
+		runCycle(cfg)
+	}
+	t.Fatalf("tickets %v did not all settle within %d cycles", ids, maxCycles)
+}
+
+func TestFix_SuccessAdvancesToDone(t *testing.T) {
 	fixSetup(t, "exit 0")
 	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
 
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
 
-	runCycle(loadTestConfig(t))
+	// implement -> verify -> review -> done: no acceptance-gating distinction
+	// exists anymore, so a clean run lands straight on done (see the v2
+	// flow-engine rewrite — acceptance-gating was dropped entirely).
+	runUntilSettled(t, loadTestConfig(t), "1", 6)
 
 	if fileExists(".kanban/200-in-progress/card.md") {
 		t.Error("card still in 200-in-progress after a successful run")
 	}
-	if !fileExists(".kanban/250-review/card.md") {
-		t.Fatal("card did not reach 250-review")
+	if !fileExists(".kanban/300-done/card.md") {
+		t.Fatal("card did not reach 300-done")
 	}
-	card := mustReadCard(t, ".kanban/250-review/card.md")
-	if card.Status != model.StatusReview {
-		t.Errorf("Status = %q, want %q", card.Status, model.StatusReview)
+	card := mustReadCard(t, ".kanban/300-done/card.md")
+	if card.Status != model.StatusDone {
+		t.Errorf("Status = %q, want %q", card.Status, model.StatusDone)
 	}
-	if card.Reason != "verify-green" {
-		t.Errorf("Reason = %q, want verify-green", card.Reason)
+	if card.Reason != "done" {
+		t.Errorf("Reason = %q, want done", card.Reason)
 	}
-	// The agent's work must actually have been committed.
+	// The agent's work must actually have been committed and merged.
 	if !fileExists("feature.txt") {
-		t.Error("feature.txt not present after a successful run — the ticket's commit never landed")
+		t.Error("feature.txt not present after a successful run — the ticket's commit never landed on main")
 	}
 }
 
@@ -205,7 +251,8 @@ func TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall(t *testing.T) {
 // isolation was removed over previously: an agent writing outside its
 // assigned worktree, directly into the shared main checkout. The escape
 // detector must catch this and block the ticket rather than let it proceed
-// as if nothing happened.
+// as if nothing happened. This is detected within the implement state's own
+// single attempt, so one poll cycle is enough.
 func TestFix_AgentEscapedWorktreeBlocksTicket(t *testing.T) {
 	dir := fixSetup(t, "exit 0")
 	escapeBody := "  touch " + shq(filepath.Join(dir, "escaped.txt"))
@@ -260,10 +307,10 @@ func TestFix_MergeRemovesWorktreeAndBranch(t *testing.T) {
 	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
 
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "9")
-	runCycle(loadTestConfig(t))
+	runUntilSettled(t, loadTestConfig(t), "9", 6)
 
-	if !fileExists(".kanban/250-review/card.md") {
-		t.Fatal("card did not reach 250-review")
+	if !fileExists(".kanban/300-done/card.md") {
+		t.Fatal("card did not reach 300-done")
 	}
 	if fileExists(worktreeDir(dir, "9")) {
 		t.Error("worktree directory should have been removed after merging")
@@ -274,7 +321,7 @@ func TestFix_MergeRemovesWorktreeAndBranch(t *testing.T) {
 	if log := gitOut(t, "log", "--oneline"); !strings.Contains(log, "9: Test") {
 		t.Errorf("main branch log should contain the ticket's commit: %q", log)
 	}
-	card := mustReadCard(t, ".kanban/250-review/card.md")
+	card := mustReadCard(t, ".kanban/300-done/card.md")
 	if card.Worktree != "" {
 		t.Errorf("Worktree = %q, want empty once the worktree is merged and removed", card.Worktree)
 	}
@@ -388,100 +435,6 @@ func TestFix_MergeReturnsClearErrorOnRebaseConflict(t *testing.T) {
 	}
 }
 
-// TestFix_DoneOnCleanReviewSkipsReviewStage confirms the opt-in
-// done-on-clean-review config flag lets a ticket with no Acceptance
-// criteria go straight to done on a clean reviewer pass, instead of
-// stopping at review for a human to promote manually. The off-by-default
-// case (flag unset) is already covered by TestFix_SuccessAdvancesToReview.
-func TestFix_DoneOnCleanReviewSkipsReviewStage(t *testing.T) {
-	fixSetup(t, "exit 0")
-	f, err := os.OpenFile("ekbn.config.yml", os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.WriteString("done-on-clean-review: true\n"); err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
-
-	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
-
-	runCycle(loadTestConfig(t))
-
-	if fileExists(".kanban/250-review/card.md") {
-		t.Error("card should not stop at 250-review when done-on-clean-review is set")
-	}
-	if !fileExists(".kanban/300-done/card.md") {
-		t.Fatal("card did not reach 300-done")
-	}
-	card := mustReadCard(t, ".kanban/300-done/card.md")
-	if card.Status != model.StatusDone {
-		t.Errorf("Status = %q, want %q", card.Status, model.StatusDone)
-	}
-	if card.Reason != "verify-green" {
-		t.Errorf("Reason = %q, want verify-green", card.Reason)
-	}
-}
-
-// TestFix_ProseAcceptanceDoesNotBlock guards against a real bug: Acceptance
-// is documented as either a real command or descriptive prose, but a prose
-// value handed to sh -c fails with "command not found" (exit 127) and used
-// to block the ticket outright. Prose should behave exactly like no
-// acceptance at all — reviewed, not blocked, not silently auto-done.
-func TestFix_ProseAcceptanceDoesNotBlock(t *testing.T) {
-	fixSetup(t, "exit 0")
-	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
-
-	mustWrite(t, ".kanban/100-todo/card.md",
-		"---\ntitle: Test\nid: 1\nstatus: todo\nacceptance: \"Prose: some criteria are met\"\n---\n\nDo the thing.\n")
-
-	runCycle(loadTestConfig(t))
-
-	if fileExists(".kanban/400-blocked/card.md") {
-		t.Fatal("card should not block on prose acceptance text")
-	}
-	if !fileExists(".kanban/250-review/card.md") {
-		t.Fatal("card with prose acceptance should land in review, same as no acceptance at all")
-	}
-}
-
-// TestFix_PassingAcceptanceStillGoesDone is a regression check: a real,
-// passing acceptance command must still auto-promote the ticket to done.
-func TestFix_PassingAcceptanceStillGoesDone(t *testing.T) {
-	fixSetup(t, "exit 0")
-	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
-
-	mustWrite(t, ".kanban/100-todo/card.md",
-		"---\ntitle: Test\nid: 1\nstatus: todo\nacceptance: \"exit 0\"\n---\n\nDo the thing.\n")
-
-	runCycle(loadTestConfig(t))
-
-	if !fileExists(".kanban/300-done/card.md") {
-		t.Fatal("a real, passing acceptance command should still auto-promote the ticket to done")
-	}
-}
-
-// TestFix_FailingAcceptanceStillBlocks is a regression check: a real
-// command that genuinely fails (not "command not found") must still block.
-func TestFix_FailingAcceptanceStillBlocks(t *testing.T) {
-	fixSetup(t, "exit 0")
-	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
-
-	mustWrite(t, ".kanban/100-todo/card.md",
-		"---\ntitle: Test\nid: 1\nstatus: todo\nacceptance: \"exit 1\"\n---\n\nDo the thing.\n")
-
-	runCycle(loadTestConfig(t))
-
-	if !fileExists(".kanban/400-blocked/card.md") {
-		t.Fatal("a real, failing acceptance command should still block the ticket")
-	}
-	card := mustReadCard(t, ".kanban/400-blocked/card.md")
-	if card.Reason != "acceptance-check-failed" {
-		t.Errorf("Reason = %q, want acceptance-check-failed", card.Reason)
-	}
-}
-
 // TestFix_PreexistingUntrackedFileNotCommitted guards against a real bug:
 // a naive `git add -A` at commit time, run inside a ticket's own worktree,
 // sweeps in whatever untracked scaffolding an agent CLI drops there on its
@@ -494,10 +447,10 @@ func TestFix_PreexistingUntrackedFileNotCommitted(t *testing.T) {
 	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
 
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
-	runCycle(loadTestConfig(t))
+	runUntilSettled(t, loadTestConfig(t), "1", 6)
 
 	if !fileExists("feature.txt") {
-		t.Fatal("feature.txt not present — the ticket's commit never landed")
+		t.Fatal("feature.txt not present — the ticket's commit never landed on main")
 	}
 	files, err := commitDiffFiles(gitOut(t, "rev-parse", "HEAD"))
 	if err != nil {
@@ -513,17 +466,12 @@ func TestFix_PreexistingUntrackedFileNotCommitted(t *testing.T) {
 	}
 }
 
-// TestFix_WIPLimitClampedToOne asserts that, even with a higher WIPLimit
-// configured, capacity is clamped to 1: each ticket has its own worktree
-// again, but merging one back into main on completion only handles a
-// fast-forward, which assumes tickets finish in the order they were
-// claimed — real concurrency needs its own conflict/rebase story first.
 // TestFix_WIPLimitTwoRunsBothConcurrently confirms raising wip-limit actually
 // lets two tickets run in the same poll cycle — each in its own worktree —
-// and both reach their terminal state, including merging both commits back
-// into main (exercising mergeAndRemoveWorktree's rebase-retry path for
-// whichever of the two merges second, since both branch from the same
-// mainHead).
+// and both eventually reach their terminal state, including merging both
+// commits back into main (exercising mergeAndRemoveWorktree's rebase-retry
+// path for whichever of the two merges second, since both branch from the
+// same mainHead).
 func TestFix_WIPLimitTwoRunsBothConcurrently(t *testing.T) {
 	fixSetup(t, "exit 0")
 	fakeAgentAndReviewer(t, countingAgentBody(t), filepath.Join(t.TempDir(), "no-findings"))
@@ -533,13 +481,13 @@ func TestFix_WIPLimitTwoRunsBothConcurrently(t *testing.T) {
 
 	cfg := loadTestConfig(t)
 	cfg.WIPLimit = 2
-	runCycle(cfg)
+	runUntilAllSettled(t, cfg, []string{"1", "2"}, 12)
 
-	if !fileExists(".kanban/250-review/a.md") {
-		t.Error("a.md did not reach 250-review")
+	if !fileExists(".kanban/300-done/a.md") {
+		t.Error("a.md did not reach 300-done")
 	}
-	if !fileExists(".kanban/250-review/b.md") {
-		t.Error("b.md did not reach 250-review — both tickets should run concurrently with wip-limit 2")
+	if !fileExists(".kanban/300-done/b.md") {
+		t.Error("b.md did not reach 300-done — both tickets should run concurrently with wip-limit 2")
 	}
 	log := gitOut(t, "log", "--oneline")
 	if !strings.Contains(log, "1: First") {
@@ -579,23 +527,64 @@ func TestFix_DeclaredBlockedMidRunIsRespected(t *testing.T) {
 	}
 }
 
-func TestFix_NoRetryOnVerifyFailure(t *testing.T) {
+// TestFix_VerifyFailureCyclesBackToImplement guards a genuine, intentional
+// v2 behavior change: a failing verify state no longer discards the attempt
+// and blocks outright (the old model's "no retry on verify failure"). It now
+// routes back to the implement state per the flow's own `on: {failed:
+// implement}` transition — fix-forward, not discard-and-block — the same way
+// every other classified outcome is routed. The already-committed work stays
+// in the worktree; only once the flow's total-attempt budget is exhausted
+// does it actually block (see TestFix_TotalAttemptsBackstopClosesPingPong).
+func TestFix_VerifyFailureCyclesBackToImplement(t *testing.T) {
 	fixSetup(t, "exit 1")
 	calls, _ := fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
 
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "4")
-	runCycle(loadTestConfig(t))
+	cfg := loadTestConfig(t)
+
+	runCycle(cfg) // implement: succeeds, commits, advances to verify
+	runCycle(cfg) // verify: fails, routes back to implement
+
+	if !fileExists(".kanban/100-todo/card.md") {
+		t.Fatal("a verify failure should cycle the ticket back to todo (implement), not block it")
+	}
+	card := mustReadCard(t, ".kanban/100-todo/card.md")
+	if card.Stage != "implement" {
+		t.Errorf("Stage = %q, want implement", card.Stage)
+	}
+	if fileExists(".kanban/400-blocked/card.md") {
+		t.Error("card should not be blocked yet — a single verify failure is not the total-attempt budget")
+	}
 
 	data, err := os.ReadFile(calls)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n := len(strings.Fields(string(data))); n != 1 {
-		t.Errorf("agent invoked %d times, want 1 — a verify failure must not retry", n)
+		t.Errorf("agent invoked %d times, want 1 — verify running doesn't itself invoke the implementer again", n)
 	}
-	card := mustReadCard(t, ".kanban/400-blocked/card.md")
-	if card.Status != model.StatusBlocked || card.Reason != "verify-failed" {
-		t.Errorf("Status/Reason = %q/%q, want blocked/verify-failed", card.Status, card.Reason)
+}
+
+// TestFix_TotalAttemptsBackstopClosesPingPong guards the ping-pong case
+// TotalAttempts exists for: a verify state that always fails sends the
+// ticket back to implement forever, and since a state's own Round resets to
+// 0 every time the ticket leaves and re-enters it, neither state's own
+// MaxAttempts is ever itself exceeded. TotalAttempts, which increments on
+// every transition and never resets, is the real backstop that eventually
+// blocks the ticket.
+func TestFix_TotalAttemptsBackstopClosesPingPong(t *testing.T) {
+	fixSetup(t, "exit 1")
+	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
+
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "5")
+	cfg := loadTestConfig(t)
+
+	card := runUntilSettled(t, cfg, "5", 30)
+	if card.Status != model.StatusBlocked {
+		t.Fatalf("Status = %q, want blocked once the total-attempt budget is exhausted", card.Status)
+	}
+	if card.Reason != "flow-total-attempts-exhausted" {
+		t.Errorf("Reason = %q, want flow-total-attempts-exhausted", card.Reason)
 	}
 }
 
@@ -606,28 +595,30 @@ func TestFix_ReviewerSeesOnlyItsOwnCard(t *testing.T) {
 	writeCard(t, ".kanban/100-todo/a.md", "First", "1")
 	writeCard(t, ".kanban/100-todo/b.md", "Second", "2")
 
-	cfg := loadTestConfig(t)
-	runCycle(cfg) // processes one of the two (WIP limit 1)
-	runCycle(cfg) // processes the other
+	cfg := loadTestConfig(t) // WIP limit 1: only one ticket in progress at a time
+	runUntilAllSettled(t, cfg, []string{"1", "2"}, 20)
 
 	data, err := os.ReadFile(prompt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(data)
-	if !strings.Contains(got, "file2.txt") {
-		t.Error("second card's reviewer prompt does not mention its own file")
+	sawFile1 := strings.Contains(got, "file1.txt")
+	sawFile2 := strings.Contains(got, "file2.txt")
+	if sawFile1 && sawFile2 {
+		t.Errorf("the last reviewer prompt mentions both cards' files — the diff is not isolated per ticket: %q", got)
 	}
-	if strings.Contains(got, "file1.txt") {
-		t.Error("second card's reviewer prompt contains the first card's file — the diff is accumulating")
+	if !sawFile1 && !sawFile2 {
+		t.Errorf("the last reviewer prompt mentions neither card's file: %q", got)
 	}
 }
 
 // TestFix_ReviewerSeesCumulativeDiffAcrossRounds guards against the inverse
-// bug from TestFix_ReviewerSeesOnlyItsOwnCard above: a round-2+ reviewer,
-// given a stage whose latest round made no new commit (because round 1's
-// work already satisfies the ticket), must still see round 1's real,
-// already-committed work — not an empty diff.
+// bug from TestFix_ReviewerSeesOnlyItsOwnCard above: after reviewer findings
+// send a ticket back to implement, and that round's agent makes no new
+// commit (because the first round's work already satisfies the ticket), the
+// next review must still see the first round's real, already-committed
+// work — not an empty diff.
 func TestFix_ReviewerSeesCumulativeDiffAcrossRounds(t *testing.T) {
 	dir := fixSetup(t, "exit 0")
 	findings := filepath.Join(dir, "findings.txt")
@@ -635,30 +626,39 @@ func TestFix_ReviewerSeesCumulativeDiffAcrossRounds(t *testing.T) {
 	_, prompt := fakeAgentAndReviewer(t, firstCallOnlyAgentBody(t), findings)
 
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "7")
-	cfg := loadTestConfig(t) // max_rounds: 2 for the "work" stage
+	cfg := loadTestConfig(t)
 
-	runCycle(cfg) // round 1: reviewer finds issues, cycles back
+	runCycle(cfg) // implement: creates file1.txt, commits, advances to verify
+	runCycle(cfg) // verify: passes, advances to review
+	runCycle(cfg) // review: finds a concern, routes back to implement
 	card := mustReadCard(t, ".kanban/100-todo/card.md")
-	if card.Round != 1 {
-		t.Fatalf("Round = %d, want 1", card.Round)
+	if card.Stage != "implement" {
+		t.Fatalf("Stage = %q, want implement (routed back by the review's findings transition)", card.Stage)
+	}
+	if !strings.Contains(card.Content, "needs another look") {
+		t.Error("the reviewer's finding was not written back onto the card")
 	}
 
-	runCycle(cfg) // round 2: agent makes no new commit; reviewer must still see file1.txt
+	runCycle(cfg) // implement: agent makes no new commit this round (round > 1)
+	runCycle(cfg) // verify: passes again
+	runCycle(cfg) // review: must still see file1.txt in the cumulative diff
+
 	data, err := os.ReadFile(prompt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), "file1.txt") {
-		t.Error("round-2 reviewer prompt does not mention file1.txt — it was handed an empty diff instead of the cumulative one")
+		t.Error("the second review's prompt does not mention file1.txt — it was handed an empty diff instead of the cumulative one")
 	}
 }
 
 // TestFix_EmptyDiffBlocksWithoutInvokingReviewer guards against asking the
 // reviewer to judge a diff ekbn itself already knows is empty: an agent that
-// makes no changes at all must block immediately and deterministically,
-// without ever invoking the reviewer — whose only possible response to an
-// empty diff ("there's nothing here") is not guaranteed to avoid the
-// "## Concern" heading, since the model isn't deterministic about that.
+// makes no changes at all must be flagged (ambiguous outcome, routed to
+// blocked by the default flow) without ever invoking the reviewer — whose
+// only possible response to an empty diff ("there's nothing here") is not
+// guaranteed to avoid the "## Concern" heading, since the model isn't
+// deterministic about that.
 func TestFix_EmptyDiffBlocksWithoutInvokingReviewer(t *testing.T) {
 	fixSetup(t, "exit 0")
 	_, prompt := fakeAgentAndReviewer(t, "  :", filepath.Join(t.TempDir(), "no-findings"))
@@ -667,8 +667,16 @@ func TestFix_EmptyDiffBlocksWithoutInvokingReviewer(t *testing.T) {
 	runCycle(loadTestConfig(t))
 
 	card := mustReadCard(t, ".kanban/400-blocked/card.md")
-	if card.Reason != "no-changes-to-review" {
-		t.Errorf("Reason = %q, want no-changes-to-review", card.Reason)
+	// The default "feature" flow routes an ambiguous (no-changes) outcome to
+	// its single generic "blocked" terminal — see defaultFlows in
+	// internal/serve/serve.go — so the card's Reason is that terminal's name,
+	// not a bespoke string; the findings text (checked below) is what
+	// actually explains why.
+	if card.Reason != "blocked" {
+		t.Errorf("Reason = %q, want blocked", card.Reason)
+	}
+	if !strings.Contains(card.Content, "No code has changed") {
+		t.Errorf("blocked card's findings should explain that nothing changed: %q", card.Content)
 	}
 	if fileExists(prompt) {
 		t.Error("reviewer was invoked despite an empty diff — it should have been skipped entirely")
@@ -678,151 +686,64 @@ func TestFix_EmptyDiffBlocksWithoutInvokingReviewer(t *testing.T) {
 // TestFix_AgentDeclaredNoChangesNeededPassesCleanly guards the companion
 // case: an implementer that explicitly states, via the "## No Changes
 // Needed" marker, that it looked at the code and nothing needs to change
-// must pass through to review — not block — and must never invoke the
-// reviewer either, since there's still nothing to review.
+// must pass through toward the terminal state — not block — and must never
+// invoke the reviewer either at this state, since there's still nothing to
+// review yet (the empty-diff implement->verify->review path still runs the
+// reviewer once verify passes, since verify has nothing to check against an
+// empty diff either and just passes trivially).
 func TestFix_AgentDeclaredNoChangesNeededPassesCleanly(t *testing.T) {
 	fixSetup(t, "exit 0")
 	agentBody := `  printf '## No Changes Needed\n\nThe feature already exists and passes verify.'`
-	_, prompt := fakeAgentAndReviewer(t, agentBody, filepath.Join(t.TempDir(), "no-findings"))
+	fakeAgentAndReviewer(t, agentBody, filepath.Join(t.TempDir(), "no-findings"))
 
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "9")
-	runCycle(loadTestConfig(t))
+	runCycle(loadTestConfig(t)) // implement: declares no changes needed
 
-	card := mustReadCard(t, ".kanban/250-review/card.md")
-	if card.Reason != "no-changes-needed" {
-		t.Errorf("Reason = %q, want no-changes-needed", card.Reason)
+	if fileExists(".kanban/400-blocked/card.md") {
+		t.Fatal("card should not block when the agent explicitly declared no changes needed")
 	}
-	if fileExists(prompt) {
-		t.Error("reviewer was invoked despite the agent explicitly declaring no changes needed")
-	}
-}
-
-func TestFix_AttemptRefOnVerifyFailure(t *testing.T) {
-	fixSetup(t, "exit 1")
-	fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
-
-	headBefore := gitOut(t, "rev-parse", "HEAD")
-	writeCard(t, ".kanban/100-todo/card.md", "Test", "5")
-	runCycle(loadTestConfig(t))
-
-	if refs := gitOut(t, "for-each-ref", "--format=%(refname)", "refs/attempts"); refs == "" {
-		t.Error("no refs/attempts/* created — the failed attempt was discarded")
-	}
-	if fileExists("feature.txt") {
-		t.Error("feature.txt present on the main branch — a failed attempt must never merge")
-	}
-	if got := gitOut(t, "rev-parse", "HEAD"); got != headBefore {
-		t.Error("HEAD moved on a failed card")
-	}
-	card := mustReadCard(t, ".kanban/400-blocked/card.md")
-	if card.AttemptRef == "" {
-		t.Error("attempt_ref not recorded on the blocked card")
-	}
-	// The working directory must be exactly as clean as before the attempt.
-	if gitTreeDirty(".") {
-		t.Error("working tree left dirty after a failed attempt was reverted")
+	card := mustReadCard(t, ".kanban/100-todo/card.md")
+	if card.Stage != "verify" {
+		t.Errorf("Stage = %q, want verify — a declared no-changes-needed result should still be treated as success", card.Stage)
 	}
 }
 
 func TestFix_MultiStageAdvancement(t *testing.T) {
-	dir := t.TempDir()
-	origWd, _ := os.Getwd()
-	os.Chdir(dir)
-	t.Cleanup(func() { os.Chdir(origWd) })
-
-	initGitRepo(t)
-	cfg := "verify: \"exit 0\"\n" +
-		"wip-limit: 1\n" +
-		"flows:\n  feature:\n    stages: [implement, gates]\n    max_rounds: 2\n" +
-		testRolesConfig
-	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
-	ensureKanbanDirs()
-
+	fixSetup(t, "exit 0")
 	fakeAgentAndReviewer(t, countingAgentBody(t), filepath.Join(t.TempDir(), "no-findings"))
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
 
-	runCycle(loadTestConfig(t)) // stage 1: implement
+	cfg := loadTestConfig(t)
+	runCycle(cfg) // implement
 	if !fileExists(".kanban/100-todo/card.md") {
-		t.Fatal("after finishing a non-terminal stage, the card should return to todo for the next stage")
+		t.Fatal("after finishing a non-terminal state, the card should return to todo for the next state")
 	}
 	card := mustReadCard(t, ".kanban/100-todo/card.md")
-	if card.Stage != "gates" {
-		t.Errorf("Stage = %q, want %q", card.Stage, "gates")
+	if card.Stage != "verify" {
+		t.Errorf("Stage = %q, want %q", card.Stage, "verify")
 	}
 	if card.Round != 0 {
-		t.Errorf("Round = %d, want 0 (reset on stage advance)", card.Round)
+		t.Errorf("Round = %d, want 0 (reset on state advance)", card.Round)
+	}
+	if card.TotalAttempts != 1 {
+		t.Errorf("TotalAttempts = %d, want 1", card.TotalAttempts)
 	}
 	if fileExists("file1.txt") {
-		t.Error("the implement stage's commit isn't merged yet — it should not be on the main branch until the ticket reaches its terminal state")
-	}
-	if !fileExists(filepath.Join(worktreeDir(dir, "1"), "file1.txt")) {
-		t.Error("the implement stage's commit should be sitting in the ticket's own worktree, isolated from main")
+		t.Error("the implement state's commit isn't merged yet — it should not be on the main branch until the ticket reaches its terminal state")
 	}
 
-	runCycle(loadTestConfig(t)) // stage 2: gates (last stage) -> review
-	if !fileExists(".kanban/250-review/card.md") {
-		t.Fatal("after finishing the last stage, the card should reach review")
+	runCycle(cfg) // verify
+	card = mustReadCard(t, ".kanban/100-todo/card.md")
+	if card.Stage != "review" {
+		t.Errorf("Stage = %q, want %q", card.Stage, "review")
+	}
+
+	runCycle(cfg) // review -> terminal done
+	if !fileExists(".kanban/300-done/card.md") {
+		t.Fatal("after the review state finds nothing, the card should reach done")
 	}
 	if !fileExists("file1.txt") {
-		t.Error("the implement stage's commit should be on the main branch now that the ticket has merged")
-	}
-	if !fileExists("file2.txt") {
-		t.Error("the gates stage's commit should already be on the main branch")
-	}
-}
-
-// TestFix_ReviewerGetsStageContextForNonFinalStage guards against a real
-// bug: a reviewer given only the ticket's full body has no way to know a
-// multi-stage flow exists, so it judges an early stage's diff against the
-// ticket's overall acceptance criteria and flags legitimately-incomplete
-// work as a concern. This confirms the reviewer prompt now says otherwise.
-func TestFix_ReviewerGetsStageContextForNonFinalStage(t *testing.T) {
-	dir := t.TempDir()
-	origWd, _ := os.Getwd()
-	os.Chdir(dir)
-	t.Cleanup(func() { os.Chdir(origWd) })
-
-	initGitRepo(t)
-	cfg := "verify: \"exit 0\"\n" +
-		"wip-limit: 1\n" +
-		"flows:\n  feature:\n    stages: [reproduce, fix]\n    max_rounds: 2\n" +
-		testRolesConfig
-	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
-	ensureKanbanDirs()
-
-	_, promptFile := fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
-	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
-
-	runCycle(loadTestConfig(t))
-
-	prompt, err := os.ReadFile(promptFile)
-	if err != nil {
-		t.Fatalf("reviewer was never invoked: %v", err)
-	}
-	got := string(prompt)
-	if !strings.Contains(got, `this diff is only stage "reproduce" (1 of 2)`) {
-		t.Errorf("reviewer prompt missing stage context: %q", got)
-	}
-	if !strings.Contains(got, "Do not expect the ticket's overall acceptance criteria to be met yet") {
-		t.Errorf("reviewer prompt missing the don't-expect-full-criteria guidance: %q", got)
-	}
-}
-
-// TestFix_ReviewerGetsNoStageContextForSingleStageFlow confirms the common
-// case (a single-stage flow) is unaffected — no stage-context text at all.
-func TestFix_ReviewerGetsNoStageContextForSingleStageFlow(t *testing.T) {
-	fixSetup(t, "exit 0")
-	_, promptFile := fakeAgentAndReviewer(t, "  touch feature.txt", filepath.Join(t.TempDir(), "no-findings"))
-	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
-
-	runCycle(loadTestConfig(t))
-
-	prompt, err := os.ReadFile(promptFile)
-	if err != nil {
-		t.Fatalf("reviewer was never invoked: %v", err)
-	}
-	if strings.Contains(string(prompt), "This ticket is worked in stages") {
-		t.Errorf("single-stage flow should get no stage context, got: %q", string(prompt))
+		t.Error("the implement state's commit should be on the main branch now that the ticket has merged")
 	}
 }
 
@@ -844,7 +765,7 @@ func TestFix_BuildSystemPromptFallsBackToDotAgentsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prompt := buildSystemPrompt("card.md", model.Card{}, serve.RoleConfig{}, serve.StageFlow{})
+	prompt := buildSystemPrompt("card.md", model.Card{}, serve.RoleConfig{}, serve.Flow{})
 	if !strings.Contains(prompt, "project base instructions") {
 		t.Errorf("prompt should fall back to .agents/AGENTS.md when AGENTS.md is absent, got: %q", prompt)
 	}
@@ -860,63 +781,12 @@ func TestFix_PromptExplicitlyForbidsMutatingGit(t *testing.T) {
 	os.Chdir(dir)
 	t.Cleanup(func() { os.Chdir(origWd) })
 
-	prompt := buildSystemPrompt("card.md", model.Card{}, serve.RoleConfig{}, serve.StageFlow{})
+	prompt := buildSystemPrompt("card.md", model.Card{}, serve.RoleConfig{}, serve.Flow{})
 	if !strings.Contains(prompt, "Do not run git commands that write or mutate") {
 		t.Errorf("prompt should explicitly forbid mutating git commands, got: %q", prompt)
 	}
 	if !strings.Contains(prompt, "status") || !strings.Contains(prompt, "diff") {
 		t.Errorf("prompt should name at least some allowed read-only git subcommands, got: %q", prompt)
-	}
-}
-
-// TestFix_NoChangesNeededInstructionIsStageAware guards against a real bug:
-// the implementer's final stage often has nothing left to change (earlier
-// stages already did the work), but a generic "say so if nothing needs to
-// change" instruction didn't reliably get the agent to use the "## No
-// Changes Needed" marker there, leaving the ticket blocked with a low-value
-// message instead. The final stage's prompt must reassure the agent this is
-// a normal, expected outcome; a non-final stage's prompt must not.
-func TestFix_NoChangesNeededInstructionIsStageAware(t *testing.T) {
-	dir := t.TempDir()
-	origWd, _ := os.Getwd()
-	os.Chdir(dir)
-	t.Cleanup(func() { os.Chdir(origWd) })
-
-	initGitRepo(t)
-	cfg := "verify: \"exit 0\"\n" +
-		"wip-limit: 1\n" +
-		"flows:\n  feature:\n    stages: [reproduce, fix]\n    max_rounds: 2\n" +
-		testRolesConfig
-	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
-	ensureKanbanDirs()
-
-	agentPromptFile := filepath.Join(t.TempDir(), "agent-prompt.txt")
-	agentBody := "  printf '%s' \"$2\" > " + shq(agentPromptFile) + "\n  touch file1.txt"
-	fakeAgentAndReviewer(t, agentBody, filepath.Join(t.TempDir(), "no-findings"))
-	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
-
-	runCycle(loadTestConfig(t)) // stage 1: reproduce (not last stage)
-
-	prompt1, err := os.ReadFile(agentPromptFile)
-	if err != nil {
-		t.Fatalf("agent was never invoked: %v", err)
-	}
-	if strings.Contains(string(prompt1), "final stage of a multi-stage ticket") {
-		t.Errorf("non-final stage's prompt should not get the final-stage reassurance: %q", prompt1)
-	}
-
-	runCycle(loadTestConfig(t)) // stage 2: fix (last stage)
-
-	prompt2, err := os.ReadFile(agentPromptFile)
-	if err != nil {
-		t.Fatalf("agent was never invoked on stage 2: %v", err)
-	}
-	got := string(prompt2)
-	if !strings.Contains(got, "final stage of a multi-stage ticket") {
-		t.Errorf("final stage's prompt should get the final-stage reassurance: %q", got)
-	}
-	if !strings.Contains(got, "multi-stage ticket (reproduce → fix)") {
-		t.Errorf("final stage's prompt should name the full stage sequence: %q", got)
 	}
 }
 
@@ -933,8 +803,8 @@ const idleStallAgentBody = "  sleep 90"
 // prove the actual config -> kill -> retry path, on top of the fast,
 // sub-second unit test of the watchdog mechanism itself
 // (TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall).
-const idleTimeoutRoleConfig = "executors:\n  implement-exec:\n    command: opencode implement\n  review-exec:\n    command: opencode review\n" +
-	"roles:\n  default:\n    executor: implement-exec\n    idle_timeout_minutes: 1\n  reviewer:\n    executor: review-exec\n"
+const idleTimeoutRoleConfig = "executors:\n  implement-exec:\n    command: opencode implement\n    idle_timeout_minutes: 1\n  review-exec:\n    command: opencode review\n" +
+	"roles:\n  default:\n    executor: implement-exec\n  reviewer:\n    executor: review-exec\n"
 
 // TestFix_IdleStallCyclesBackToTodo confirms a stalled agent (no output at
 // all) is treated as a transient glitch worth retrying — cycling back to
@@ -948,7 +818,6 @@ func TestFix_IdleStallCyclesBackToTodo(t *testing.T) {
 	initGitRepo(t)
 	cfg := "verify: \"exit 0\"\n" +
 		"wip-limit: 1\n" +
-		"flows:\n  feature:\n    stages: [work]\n    max_rounds: 2\n" +
 		idleTimeoutRoleConfig
 	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
 	ensureKanbanDirs()
@@ -974,13 +843,9 @@ func TestFix_IdleStallCyclesBackToTodo(t *testing.T) {
 }
 
 // TestFix_IdleStallRoundsExhaustedBlocks confirms the idle-retry budget is
-// bounded: a ticket whose Round already sits at flow.MaxRounds (simulating
-// prior exhausted stall attempts) blocks with a distinct, honest reason
-// instead of cycling forever. Starting Round at the cap avoids re-running
-// the full multi-round march for real (the identical round > MaxRounds cap
-// logic is already proven generically by TestFix_ReviewRoundsCycleThenBlock
-// and TestFix_AgentErrorWithNoChangesCyclesThenBlocks) while still
-// confirming this new branch reaches it correctly.
+// bounded: a ticket whose Round already sits at the implement state's
+// MaxAttempts (simulating prior exhausted stall attempts, default 3) blocks
+// with a distinct, honest reason instead of cycling forever.
 func TestFix_IdleStallRoundsExhaustedBlocks(t *testing.T) {
 	dir := t.TempDir()
 	origWd, _ := os.Getwd()
@@ -989,14 +854,13 @@ func TestFix_IdleStallRoundsExhaustedBlocks(t *testing.T) {
 	initGitRepo(t)
 	cfg := "verify: \"exit 0\"\n" +
 		"wip-limit: 1\n" +
-		"flows:\n  feature:\n    stages: [work]\n    max_rounds: 2\n" +
 		idleTimeoutRoleConfig
 	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
 	ensureKanbanDirs()
 	fakeAgentAndReviewer(t, idleStallAgentBody, filepath.Join(t.TempDir(), "no-findings"))
 
 	mustWrite(t, ".kanban/100-todo/card.md",
-		"---\ntitle: Test\nid: 1\nstatus: todo\nround: 2\n---\n\nDo the thing.\n")
+		"---\ntitle: Test\nid: 1\nstatus: todo\nround: 3\n---\n\nDo the thing.\n")
 
 	runCycle(loadTestConfig(t))
 
@@ -1009,6 +873,10 @@ func TestFix_IdleStallRoundsExhaustedBlocks(t *testing.T) {
 	}
 }
 
+// TestFix_ReviewRoundsCycleThenBlock confirms persistent reviewer findings
+// eventually block a ticket rather than looping forever — bounded by the
+// flow's TotalAttempts backstop, since findings now route back to implement
+// (a state hop) rather than retrying the review state in place.
 func TestFix_ReviewRoundsCycleThenBlock(t *testing.T) {
 	dir := fixSetup(t, "exit 0")
 	findings := filepath.Join(dir, "findings.txt")
@@ -1016,32 +884,25 @@ func TestFix_ReviewRoundsCycleThenBlock(t *testing.T) {
 	fakeAgentAndReviewer(t, "  touch feature.txt", findings)
 
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "6")
-	cfg := loadTestConfig(t) // max_rounds: 2 for the "work" stage
+	cfg := loadTestConfig(t)
 
-	runCycle(cfg) // round 1: findings, cycles back to todo
-	if !fileExists(".kanban/100-todo/card.md") {
-		t.Fatal("card with round-1 findings should cycle back to todo for another attempt")
-	}
+	runCycle(cfg) // implement: commits, advances to verify
+	runCycle(cfg) // verify: passes, advances to review
+	runCycle(cfg) // review: finds a concern, routes back to implement
 	card := mustReadCard(t, ".kanban/100-todo/card.md")
-	if card.Round != 1 {
-		t.Errorf("Round = %d, want 1", card.Round)
+	if card.Stage != "implement" {
+		t.Fatalf("Stage = %q, want implement", card.Stage)
 	}
 	if !strings.Contains(card.Content, "this needs work") {
-		t.Error("round-1 findings were not written back onto the card")
+		t.Error("the reviewer's finding was not written back onto the card")
 	}
 
-	runCycle(cfg) // round 2: findings again, still within max_rounds (2) -> cycles again
-	if !fileExists(".kanban/100-todo/card.md") {
-		t.Fatal("card with round-2 findings should still cycle back — max_rounds is 2")
+	card = runUntilSettled(t, cfg, "6", 30)
+	if card.Status != model.StatusBlocked {
+		t.Fatalf("Status = %q, want blocked once the ticket keeps failing review forever", card.Status)
 	}
-
-	runCycle(cfg) // round 3: findings a third time, exceeds max_rounds -> blocked
-	if !fileExists(".kanban/400-blocked/card.md") {
-		t.Fatal("card should be blocked once review rounds are exhausted")
-	}
-	card = mustReadCard(t, ".kanban/400-blocked/card.md")
-	if card.Reason != "review-rounds-exhausted" {
-		t.Errorf("Reason = %q, want review-rounds-exhausted", card.Reason)
+	if card.Reason != "flow-total-attempts-exhausted" {
+		t.Errorf("Reason = %q, want flow-total-attempts-exhausted", card.Reason)
 	}
 }
 
@@ -1050,14 +911,15 @@ func TestFix_ReviewRoundsCycleThenBlock(t *testing.T) {
 // (e.g. a resource conflict in the agent CLI itself) used to fall straight
 // into the generic "no changes to review" block, misreporting a system
 // failure as "nothing needed changing" — and the reviewer was never even
-// invoked. It should instead retry (cycle back to todo) the same bounded way
-// reviewer findings do, only blocking once that budget is exhausted.
+// invoked. It should instead retry (cycle back to todo, same state) the same
+// bounded way an idle stall does, only blocking once that state's own
+// attempt budget (default 3) is exhausted.
 func TestFix_AgentErrorWithNoChangesCyclesThenBlocks(t *testing.T) {
 	fixSetup(t, "exit 0")
 	fakeAgentAndReviewer(t, "  exit 1", filepath.Join(t.TempDir(), "no-findings"))
 
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "7")
-	cfg := loadTestConfig(t) // max_rounds: 2 for the "work" stage
+	cfg := loadTestConfig(t)
 
 	runCycle(cfg) // attempt 1: agent errors out, no changes -> cycle back to todo
 	if !fileExists(".kanban/100-todo/card.md") {
@@ -1074,12 +936,17 @@ func TestFix_AgentErrorWithNoChangesCyclesThenBlocks(t *testing.T) {
 		t.Error("the agent's crash output was not written back onto the card")
 	}
 
-	runCycle(cfg) // attempt 2: still within max_rounds (2) -> cycles again
+	runCycle(cfg) // attempt 2: still within the default 3-attempt budget -> cycles again
 	if !fileExists(".kanban/100-todo/card.md") {
-		t.Fatal("should still cycle back for attempt 2 — max_rounds is 2")
+		t.Fatal("should still cycle back for attempt 2")
 	}
 
-	runCycle(cfg) // attempt 3: exceeds max_rounds -> blocked
+	runCycle(cfg) // attempt 3: still within budget -> cycles again
+	if !fileExists(".kanban/100-todo/card.md") {
+		t.Fatal("should still cycle back for attempt 3 — the default budget is 3")
+	}
+
+	runCycle(cfg) // attempt 4: exceeds the default 3-attempt budget -> blocked
 	if !fileExists(".kanban/400-blocked/card.md") {
 		t.Fatal("card should be blocked once the agent-error retry budget is exhausted")
 	}
@@ -1125,8 +992,12 @@ func TestFix_ReviewerNeverSeesPastFindings(t *testing.T) {
 	writeCard(t, ".kanban/100-todo/card.md", "Test", "6")
 	cfg := loadTestConfig(t)
 
-	runCycle(cfg) // round 1: finding appended to the card, cycles back to todo
-	runCycle(cfg) // round 2: reviewer runs again — must not see round 1's appended finding
+	runCycle(cfg) // implement
+	runCycle(cfg) // verify
+	runCycle(cfg) // review: finding appended to the card, routes back to implement
+	runCycle(cfg) // implement again
+	runCycle(cfg) // verify again
+	runCycle(cfg) // review again — must not see round 1's appended finding
 
 	prompt, err := os.ReadFile(promptFile)
 	if err != nil {
@@ -1153,9 +1024,7 @@ func TestFix_NoAgentCommandConfiguredBlocksTicket(t *testing.T) {
 	t.Cleanup(func() { os.Chdir(origWd) })
 
 	initGitRepo(t)
-	cfg := "verify: \"exit 0\"\n" +
-		"wip-limit: 1\n" +
-		"flows:\n  feature:\n    stages: [work]\n    max_rounds: 2\n"
+	cfg := "verify: \"exit 0\"\nwip-limit: 1\n"
 	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
 	ensureKanbanDirs()
 
@@ -1198,7 +1067,8 @@ func TestFix_ManualFolderMoveSyncsStatusAndUnblocksDependents(t *testing.T) {
 	mustWrite(t, ".kanban/100-todo/card-b.md",
 		"---\ntitle: B\nid: card-b\nstatus: todo\ndepends_on: [card-a]\n---\n\nDo the thing.\n")
 
-	runCycle(loadTestConfig(t))
+	cfg := loadTestConfig(t)
+	runCycle(cfg)
 
 	cardA := mustReadCard(t, ".kanban/300-done/card-a.md")
 	if cardA.Status != model.StatusDone {
@@ -1208,10 +1078,19 @@ func TestFix_ManualFolderMoveSyncsStatusAndUnblocksDependents(t *testing.T) {
 		t.Errorf("card A Reason = %q, want manual-move", cardA.Reason)
 	}
 
-	if fileExists(".kanban/100-todo/card-b.md") {
-		t.Error("card B still in 100-todo — dependent was not unblocked by the reconciled status")
+	// Card B should have been unblocked and its implement state run — it's
+	// back in 100-todo, now at the "verify" state, rather than the "todo"
+	// (Stage-less) it started at.
+	cardB, ok := findCard("card-b")
+	if !ok {
+		t.Fatal("card B disappeared")
 	}
-	if !fileExists(".kanban/250-review/card-b.md") {
-		t.Fatal("card B did not reach 250-review")
+	if cardB.Stage != "verify" {
+		t.Errorf("card B Stage = %q, want verify — it should have been unblocked and had its first state run", cardB.Stage)
+	}
+
+	runUntilSettled(t, cfg, "card-b", 6)
+	if !fileExists(".kanban/300-done/card-b.md") {
+		t.Fatal("card B did not reach 300-done")
 	}
 }

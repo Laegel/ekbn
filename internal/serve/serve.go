@@ -60,20 +60,147 @@ type RoleConfig struct {
 	IdleTimeoutMinutes int      `yaml:"idle_timeout_minutes,omitempty"`
 }
 
-// StageFlow is a stage sequence keyed by goal, not written into each item:
-// changing a flow's Stages/MaxRounds here takes effect for every card with
-// that goal without editing any existing card file.
-type StageFlow struct {
-	Stages    []string `yaml:"stages"`
-	MaxRounds int      `yaml:"max_rounds"`
+// FlowState is one node in a goal's flow graph. Type selects a built-in
+// stage kind ("" for a role-backed executor stage, "verify" for a command
+// whose pass/fail *is* its outcome — see classifyOutcome); Role names which
+// role runs an executor-backed state, falling back to the card's own Role
+// when empty (preserving today's "the card picks the implementer, review-
+// shaped states pick their own fixed role" split). On maps the state's
+// classified Outcome to the next state's name — either another key in the
+// same Flow's States, or a key in its Terminal map. An Outcome with no
+// entry in On is not guessed at: the ticket blocks with a clear
+// "unhandled-outcome" reason rather than silently misrouting.
+type FlowState struct {
+	Type            string                   `yaml:"type,omitempty"`
+	Role            string                   `yaml:"role,omitempty"`
+	Command         string                   `yaml:"command,omitempty"`
+	ForbidTestEdits bool                     `yaml:"forbid_test_edits,omitempty"`
+	On              map[model.Outcome]string `yaml:"on"`
+	MaxAttempts     int                      `yaml:"max_attempts,omitempty"`
+}
+
+// TerminalState is a flow's exit point — Board is which kanban column
+// (Status bucket) a card lands in when it reaches this state.
+type TerminalState struct {
+	Board model.Status `yaml:"board"`
+}
+
+// Flow is a state machine over typed stage outcomes, keyed by goal — not
+// written into each card, so changing a flow here takes effect for every
+// card with that goal without editing any existing card file. Entry is the
+// state a fresh card (empty Stage) starts at.
+type Flow struct {
+	Entry    string                   `yaml:"entry"`
+	States   map[string]FlowState     `yaml:"states"`
+	Terminal map[string]TerminalState `yaml:"terminal"`
 }
 
 // defaultFlows is used for any goal not overridden in ekbn.config.yml.
-var defaultFlows = map[string]StageFlow{
-	"bug":      {Stages: []string{"reproduce", "fix", "verify"}, MaxRounds: 3},
-	"feature":  {Stages: []string{"implement", "gates", "review"}, MaxRounds: 3},
-	"refactor": {Stages: []string{"tests-frozen", "implement", "verify-behavior"}, MaxRounds: 3},
-	"spike":    {Stages: []string{"research"}, MaxRounds: 0},
+var defaultFlows = map[string]Flow{
+	"bug": {
+		Entry: "reproduce",
+		States: map[string]FlowState{
+			"reproduce": {
+				On: map[model.Outcome]string{
+					model.OutcomeSuccess: "verify-reproduce", model.OutcomeFailed: "blocked",
+					model.OutcomeFindings: "blocked", model.OutcomeAmbiguous: "blocked", model.OutcomeBlocked: "blocked",
+				},
+			},
+			// Reaching this state with a passing verify means the bug
+			// couldn't be reproduced — success here is the bad outcome,
+			// simply by routing it to a block instead of forward.
+			"verify-reproduce": {
+				Type: "verify",
+				On:   map[model.Outcome]string{model.OutcomeSuccess: "could-not-reproduce", model.OutcomeFailed: "fix"},
+			},
+			"fix": {
+				On: map[model.Outcome]string{
+					model.OutcomeSuccess: "verify-fix", model.OutcomeFailed: "blocked", model.OutcomeFindings: "blocked", model.OutcomeAmbiguous: "blocked", model.OutcomeBlocked: "blocked",
+				},
+			},
+			"verify-fix": {
+				Type: "verify",
+				On:   map[model.Outcome]string{model.OutcomeSuccess: "review", model.OutcomeFailed: "fix"},
+			},
+			"review": {
+				Type: "review",
+				Role: "reviewer",
+				On: map[model.Outcome]string{
+					model.OutcomeSuccess: "done", model.OutcomeFindings: "fix", model.OutcomeBlocked: "blocked",
+				},
+			},
+		},
+		Terminal: map[string]TerminalState{
+			"could-not-reproduce": {Board: model.StatusBlocked},
+			"done":                {Board: model.StatusDone},
+			"blocked":             {Board: model.StatusBlocked},
+		},
+	},
+	"feature": {
+		Entry: "implement",
+		States: map[string]FlowState{
+			"implement": {
+				On: map[model.Outcome]string{
+					model.OutcomeSuccess: "verify", model.OutcomeFailed: "blocked", model.OutcomeFindings: "blocked", model.OutcomeAmbiguous: "blocked", model.OutcomeBlocked: "blocked",
+				},
+			},
+			"verify": {
+				Type: "verify",
+				On:   map[model.Outcome]string{model.OutcomeSuccess: "review", model.OutcomeFailed: "implement"},
+			},
+			"review": {
+				Type: "review",
+				Role: "reviewer",
+				On: map[model.Outcome]string{
+					model.OutcomeSuccess: "done", model.OutcomeFindings: "implement", model.OutcomeBlocked: "blocked",
+				},
+			},
+		},
+		Terminal: map[string]TerminalState{
+			"done":    {Board: model.StatusDone},
+			"blocked": {Board: model.StatusBlocked},
+		},
+	},
+	"refactor": {
+		Entry: "tests-frozen",
+		States: map[string]FlowState{
+			// ForbidTestEdits is the mechanical "tests must stay frozen
+			// during a refactor" check — any touched test file is a
+			// blocked outcome regardless of what the verify command itself
+			// says, exactly as before, now expressed as a state property
+			// instead of a goal=="refactor"-shaped if-branch.
+			"tests-frozen": {
+				ForbidTestEdits: true,
+				On: map[model.Outcome]string{
+					model.OutcomeSuccess: "verify-behavior", model.OutcomeFailed: "blocked", model.OutcomeFindings: "blocked", model.OutcomeAmbiguous: "blocked", model.OutcomeBlocked: "blocked",
+				},
+			},
+			"verify-behavior": {
+				Type: "verify",
+				On:   map[model.Outcome]string{model.OutcomeSuccess: "review", model.OutcomeFailed: "tests-frozen"},
+			},
+			"review": {
+				Type: "review",
+				Role: "reviewer",
+				On: map[model.Outcome]string{
+					model.OutcomeSuccess: "done", model.OutcomeFindings: "tests-frozen", model.OutcomeBlocked: "blocked",
+				},
+			},
+		},
+		Terminal: map[string]TerminalState{
+			"done":    {Board: model.StatusDone},
+			"blocked": {Board: model.StatusBlocked},
+		},
+	},
+	"spike": {
+		Entry: "research",
+		States: map[string]FlowState{
+			"research": {On: map[model.Outcome]string{model.OutcomeSuccess: "done"}},
+		},
+		Terminal: map[string]TerminalState{
+			"done": {Board: model.StatusDone},
+		},
+	},
 }
 
 const defaultWIPLimit = 1
@@ -87,21 +214,12 @@ type Config struct {
 	Executors     map[string]ExecutorConfig `yaml:"executors"`
 	Roles         map[string]RoleConfig     `yaml:"roles"`
 	SecurityPaths []string                  `yaml:"security-paths"`
-	Flows         map[string]StageFlow      `yaml:"flows"`
+	Flows         map[string]Flow           `yaml:"flows"`
 	// WIPLimit caps how many tickets the orchestrator runs at once. Each
 	// ticket gets its own git worktree/branch, so concurrent tickets are
 	// isolated from each other; merging back into main handles a sibling
 	// ticket having already advanced it (see mergeAndRemoveWorktree).
 	WIPLimit int `yaml:"wip-limit"`
-	// DoneOnCleanReview, if true, treats a clean code-review pass (no
-	// concrete findings, and no security findings if applicable) as
-	// sufficient to mark a ticket done even when it has no Acceptance
-	// criteria of its own — reducing how often a human has to manually
-	// promote a reviewed ticket. Off by default: without a scripted
-	// acceptance check, "the reviewer had nothing to say" is not the same
-	// guarantee as "a human confirmed this is right," so this is an explicit
-	// trade a project opts into, not silently assumed.
-	DoneOnCleanReview bool `yaml:"done-on-clean-review"`
 }
 
 // ErrUnknownExecutor is returned by ResolveExecutor when a role names an
@@ -153,7 +271,7 @@ func ResolveExecutor(role string, cfg Config) (ec ExecutorConfig, rc RoleConfig,
 
 // FlowFor returns the stage flow for goal, falling back to defaultFlows when
 // goal is unset or not present in either the config or the defaults.
-func (c Config) FlowFor(goal string) StageFlow {
+func (c Config) FlowFor(goal string) Flow {
 	if f, ok := c.Flows[goal]; ok {
 		return f
 	}
@@ -214,7 +332,6 @@ func LoadConfig() Config {
 	if parsed.WIPLimit > 0 {
 		cfg.WIPLimit = parsed.WIPLimit
 	}
-	cfg.DoneOnCleanReview = parsed.DoneOnCleanReview
 	return cfg
 }
 

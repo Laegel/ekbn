@@ -116,18 +116,6 @@ func exitCode(err error) int {
 	return -1
 }
 
-// commandNotFound reports whether err is a shell's "command not found" —
-// POSIX reserves exit 127 for exactly this, distinct from whatever exit
-// code the invoked program itself would return. A card's Acceptance field
-// that's actually prose rather than a runnable command reliably produces
-// this when handed to sh -c, rather than some arbitrary failure code.
-func commandNotFound(err error) bool {
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		return exitErr.ExitCode() == 127
-	}
-	return false
-}
-
 func ticketPath(c model.Card) string {
 	return filepath.Join(kanbanRoot, c.Column, c.Filename)
 }

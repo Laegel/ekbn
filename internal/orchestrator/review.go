@@ -32,9 +32,8 @@ func stripReviewFindings(ticketContent string) string {
 // isConcreteSecurityFinding does for the security reviewer — a model that
 // ignores the instructions below and produces other output (a banner, an
 // exploration transcript, "LGTM") can no longer accidentally block the card.
-func buildReviewPrompt(ticketContent, diff, stageContext string) string {
+func buildReviewPrompt(ticketContent, diff string) string {
 	return "You are reviewing a code change for correctness. You are not approving it — there is no \"looks good\" response.\n\n" +
-		stageContext +
 		"You have no filesystem or git access here: this directory is empty and deliberately disconnected from the real repository. " +
 		"Do not run `git`, `ls`, `find`, or any other command to look for the change — there is nothing here to find. " +
 		"The entire change is already given to you below, under \"## Changes made (git diff)\". Review only that.\n\n" +
@@ -99,7 +98,7 @@ func runReviewSession(prompt, command string) (output string, err error) {
 // entirely — treated as no findings, not an error — since there's no agent
 // to run and reviewing is optional infrastructure, not something ekbn can
 // force without one.
-func runReviewer(cfg serve.Config, ticketContent, diff, stageContext string) (findings string, err error) {
+func runReviewer(cfg serve.Config, ticketContent, diff string) (findings string, err error) {
 	ec, _, _, resolveErr := serve.ResolveExecutor("reviewer", cfg)
 	if resolveErr != nil {
 		return "", resolveErr
@@ -108,14 +107,13 @@ func runReviewer(cfg serve.Config, ticketContent, diff, stageContext string) (fi
 		log.info("No reviewer command configured — skipping general review")
 		return "", nil
 	}
-	return runReviewSession(buildReviewPrompt(ticketContent, diff, stageContext), ec.Command)
+	return runReviewSession(buildReviewPrompt(ticketContent, diff), ec.Command)
 }
 
 // buildSecurityReviewPrompt requires an exact reproduction, not advice — see
 // isConcreteSecurityFinding, which enforces that mechanically.
-func buildSecurityReviewPrompt(ticketContent, diff, stageContext string) string {
+func buildSecurityReviewPrompt(ticketContent, diff string) string {
 	return "You are a security reviewer. You are not approving this change — there is no \"looks good\" response.\n\n" +
-		stageContext +
 		"Your only job is to find a concrete way this change lets a client influence an outcome it must not: " +
 		"RNG/drop pools, summon rates and pity, battle log validation, auth/session handling, or anything reachable via a tRPC procedure.\n\n" +
 		"If you find a concrete issue, describe an exact reproduction — the specific request or input sequence that produces the wrong outcome " +
@@ -137,7 +135,7 @@ func isConcreteSecurityFinding(output string) bool {
 
 // runSecurityReviewer runs the security review gate. Same skip-if-unconfigured
 // policy as runReviewer.
-func runSecurityReviewer(cfg serve.Config, ticketContent, diff, stageContext string) (findings string, err error) {
+func runSecurityReviewer(cfg serve.Config, ticketContent, diff string) (findings string, err error) {
 	ec, _, _, resolveErr := serve.ResolveExecutor("security-reviewer", cfg)
 	if resolveErr != nil {
 		return "", resolveErr
@@ -146,5 +144,5 @@ func runSecurityReviewer(cfg serve.Config, ticketContent, diff, stageContext str
 		log.info("No security-reviewer command configured — skipping security review")
 		return "", nil
 	}
-	return runReviewSession(buildSecurityReviewPrompt(ticketContent, diff, stageContext), ec.Command)
+	return runReviewSession(buildSecurityReviewPrompt(ticketContent, diff), ec.Command)
 }
