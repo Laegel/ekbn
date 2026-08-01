@@ -5,27 +5,30 @@ verify: go test ./...
 # Max cards actively in-progress at once. Each ticket runs in its own git
 # worktree/branch, so raising this lets multiple tickets run concurrently.
 wip-limit: 1
-# If true, a ticket with no Acceptance criteria of its own still goes
-# straight to done once it clears code review (and security review, if
-# applicable) with zero concrete findings, instead of stopping at review for
-# a human to promote it manually. Off by default: a clean reviewer pass
-# isn't the same guarantee as a human confirming the change is right.
-# done-on-clean-review: true
-# Stage sequences, keyed by goal — not written into each card. Changing a
-# flow here changes it for every card with that goal, existing or new.
-flows:
-  bug:
-    stages: [reproduce, fix, verify]
-    max_rounds: 3
-  feature:
-    stages: [implement, gates, review]
-    max_rounds: 3
-  refactor:
-    stages: [tests-frozen, implement, verify-behavior]
-    max_rounds: 3
-  spike:
-    stages: [research]
-    max_rounds: 0
+# A flow is a state machine over typed outcomes (success/failed/findings/
+# blocked/ambiguous/budget-exhausted), keyed by goal — not written into each
+# card, so changing a flow here changes it for every card with that goal,
+# existing or new. This project uses the built-in defaults for bug/feature/
+# refactor/spike (see defaultFlows in internal/serve/serve.go) unmodified;
+# override a goal here only if it needs a different graph, e.g.:
+#
+# flows:
+#   feature:
+#     entry: implement
+#     states:
+#       implement:
+#         role: backend
+#         on: {success: verify, failed: blocked, findings: blocked, ambiguous: blocked, blocked: blocked}
+#       verify:
+#         type: verify
+#         on: {success: review, failed: implement}
+#       review:
+#         type: review
+#         role: reviewer
+#         on: {success: done, findings: implement, blocked: blocked}
+#     terminal:
+#       done: {board: done}
+#       blocked: {board: blocked}
 prompt: |
   Available tools: list_columns, create_card
 
