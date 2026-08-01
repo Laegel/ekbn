@@ -141,7 +141,7 @@ var readOnlyGitSubcommands = []string{
 	"config", "symbolic-ref", "remote", "for-each-ref", "check-ignore",
 }
 
-func runAgentAttempt(prompt, dir, command string, maxDuration, idleTimeout time.Duration) (output string, runErr error, usedGit, timedOut, idleTimedOut bool) {
+func runAgentAttempt(prompt, dir, command string, maxDuration, idleTimeout time.Duration) (output string, runErr error, usedGit bool, usedGitCmd string, timedOut, idleTimedOut bool) {
 	shimDir, mkErr := os.MkdirTemp("", "ekbn-git-shim-")
 	env := os.Environ()
 	marker := ""
@@ -195,7 +195,7 @@ esac
 if [ -n "$gitdir" ] && [ "$gitdir" != %q ]; then
 	exec %q "$@"
 fi
-touch %q
+printf '%%s\n' "git $*" > %q
 echo "git '$subcmd' is not permitted here — only read-only commands (%s) are allowed; use the ekbn MCP tools for anything else" >&2
 exit 1
 `, strings.Join(readOnlyGitSubcommands, "|"), realGit, projectGitDir, realGit, marker, strings.Join(readOnlyGitSubcommands, ", "))
@@ -278,8 +278,13 @@ exit 1
 	close(watchdogDone)
 	timedOut = ctx.Err() == context.DeadlineExceeded
 	idleTimedOut = idleTriggered.Load()
-	usedGit = marker != "" && fileExists(marker)
-	return strings.TrimSpace(buf.String()), runErr, usedGit, timedOut, idleTimedOut
+	if marker != "" {
+		if data, readErr := os.ReadFile(marker); readErr == nil {
+			usedGit = true
+			usedGitCmd = strings.TrimSpace(string(data))
+		}
+	}
+	return strings.TrimSpace(buf.String()), runErr, usedGit, usedGitCmd, timedOut, idleTimedOut
 }
 
 // Card status transitions. TransitionStatus (in model) is the only thing
@@ -575,7 +580,7 @@ func runTicket(cfg serve.Config, card model.Card) {
 	mainBefore, _ := git(projectRoot, "status", "--short")
 	mainCheckoutMu.Unlock()
 
-	output, agentErr, usedGit, timedOut, idleTimedOut := runAgentAttempt(prompt, workDir, rc.Command,
+	output, agentErr, usedGit, usedGitCmd, timedOut, idleTimedOut := runAgentAttempt(prompt, workDir, rc.Command,
 		time.Duration(rc.MaxDurationMinutes)*time.Minute, time.Duration(rc.IdleTimeoutMinutes)*time.Minute)
 
 	mainCheckoutMu.Lock()
@@ -616,9 +621,10 @@ func runTicket(cfg serve.Config, card model.Card) {
 		return
 	}
 	if usedGit {
-		log.warn("✋  Ticket #%s used git directly — blocking", id)
+		log.warn("✋  Ticket #%s used git directly (%s) — blocking", id, usedGitCmd)
 		abandonAttempt(workDir, id, column, filename, preexisting)
-		transitionBlocked(column, filename, "agent-used-git")
+		transitionBlockedWithFindings(column, filename, "agent-used-git",
+			fmt.Sprintf("The agent ran a disallowed git command directly instead of using the ekbn MCP tools: `%s`", usedGitCmd))
 		return
 	}
 	if agentErr == nil {
@@ -892,7 +898,7 @@ func runSpike(cfg serve.Config, path, column, filename string, card model.Card, 
 
 	preexisting := untrackedFiles(projectRoot)
 
-	output, agentErr, usedGit, timedOut, idleTimedOut := runAgentAttempt(prompt, projectRoot, rc.Command,
+	output, agentErr, usedGit, usedGitCmd, timedOut, idleTimedOut := runAgentAttempt(prompt, projectRoot, rc.Command,
 		time.Duration(rc.MaxDurationMinutes)*time.Minute, time.Duration(rc.IdleTimeoutMinutes)*time.Minute)
 	if idleTimedOut {
 		round := card.Round + 1
@@ -918,7 +924,8 @@ func runSpike(cfg serve.Config, path, column, filename string, card model.Card, 
 	}
 	if usedGit {
 		resetWorkingTree(projectRoot, preexisting)
-		transitionBlocked(column, filename, "agent-used-git")
+		transitionBlockedWithFindings(column, filename, "agent-used-git",
+			fmt.Sprintf("The agent ran a disallowed git command directly instead of using the ekbn MCP tools: `%s`", usedGitCmd))
 		return
 	}
 	if agentErr != nil {

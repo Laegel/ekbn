@@ -154,7 +154,7 @@ func TestFix_RunAgentAttemptSubstitutesWorkdirTemplate(t *testing.T) {
 	}
 
 	command := filepath.Join(helperDir, "fakecmd") + " {workdir}"
-	if _, err, _, _, _ := runAgentAttempt("prompt", dir, command, 0, 0); err != nil {
+	if _, err, _, _, _, _ := runAgentAttempt("prompt", dir, command, 0, 0); err != nil {
 		t.Fatalf("runAgentAttempt failed: %v", err)
 	}
 
@@ -183,7 +183,7 @@ func TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall(t *testing.T) {
 
 	command := filepath.Join(helperDir, "stallcmd")
 	start := time.Now()
-	output, _, _, timedOut, idleTimedOut := runAgentAttempt("prompt", dir, command, 0, 100*time.Millisecond)
+	output, _, _, _, timedOut, idleTimedOut := runAgentAttempt("prompt", dir, command, 0, 100*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if !idleTimedOut {
@@ -225,6 +225,29 @@ func TestFix_AgentEscapedWorktreeBlocksTicket(t *testing.T) {
 	}
 	if want := worktreeDir(dir, "1"); card.Worktree != want {
 		t.Errorf("Worktree = %q, want %q — should stay visible on a blocked card", card.Worktree, want)
+	}
+}
+
+// TestFix_AgentUsedGitRecordsTheActualCommand guards against a real gap: the
+// git shim only ever recorded *that* a disallowed command ran, via an empty
+// touch, not *what* it was — leaving every "agent-used-git" block a guess.
+// The blocked card's findings should now name the exact command.
+func TestFix_AgentUsedGitRecordsTheActualCommand(t *testing.T) {
+	fixSetup(t, "exit 0")
+	fakeAgentAndReviewer(t, "  git commit -am 'sneaky'", filepath.Join(t.TempDir(), "no-findings"))
+
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
+	runCycle(loadTestConfig(t))
+
+	if !fileExists(".kanban/400-blocked/card.md") {
+		t.Fatal("card did not block after the agent used git directly")
+	}
+	card := mustReadCard(t, ".kanban/400-blocked/card.md")
+	if card.Reason != "agent-used-git" {
+		t.Errorf("Reason = %q, want agent-used-git", card.Reason)
+	}
+	if !strings.Contains(card.Content, "git commit -am") {
+		t.Errorf("blocked card's findings should name the actual command that was run: %q", card.Content)
 	}
 }
 
