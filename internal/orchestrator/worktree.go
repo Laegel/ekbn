@@ -5,7 +5,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// mainCheckoutMu serializes the quick administrative git calls that touch
+// the shared main checkout — resolving mainHead, creating/merging/removing a
+// worktree, the escape-check status reads — so two tickets' git plumbing
+// never races on the same .git directory. It deliberately does not cover the
+// agent's own run, which stays fully concurrent inside each ticket's own
+// worktree; only these brief calls need to be serialized.
+var mainCheckoutMu sync.Mutex
 
 // worktreeDir returns the deterministic filesystem path for a ticket's
 // isolated worktree, derived from projectRoot and the ticket's ID alone —
@@ -32,6 +41,9 @@ func worktreeBranch(id string) string {
 // rounds/stages of the same ticket so reviewer-requested changes build on
 // the same in-progress branch instead of starting over.
 func ensureWorktree(projectRoot, id, baseSHA string) (string, error) {
+	mainCheckoutMu.Lock()
+	defer mainCheckoutMu.Unlock()
+
 	dir := worktreeDir(projectRoot, id)
 	branch := worktreeBranch(id)
 
@@ -66,18 +78,36 @@ func ensureWorktree(projectRoot, id, baseSHA string) (string, error) {
 	return dir, nil
 }
 
-// mergeAndRemoveWorktree fast-forward-merges a ticket's branch into
-// projectRoot and tears down its worktree. WIP is clamped to 1, so every
-// ticket branches from main's current HEAD and finishes before the next
-// one starts — the fast-forward always succeeds; if it doesn't (main moved
-// some other way while the ticket ran), that's surfaced as an error rather
-// than papered over with an automatic rebase.
+// mergeAndRemoveWorktree merges a ticket's branch into projectRoot and tears
+// down its worktree. With more than one ticket in flight, both can branch
+// from the same mainHead — whichever merges second is no longer a
+// fast-forward once the first has landed. The fast path (plain --ff-only)
+// still handles the common case cheaply; on failure, the ticket's branch is
+// rebased onto main's new tip (rewriting it in place, since the worktree's
+// HEAD is a symbolic ref to the branch) and the fast-forward is retried. If
+// the rebase itself conflicts, it's aborted — restoring the worktree exactly
+// as it was — and the conflict is surfaced as an error rather than resolved
+// automatically; the worktree and branch are left in place for a human to
+// resolve, since this returns before reaching the teardown calls below.
 func mergeAndRemoveWorktree(projectRoot, id string) error {
+	mainCheckoutMu.Lock()
+	defer mainCheckoutMu.Unlock()
+
 	branch := worktreeBranch(id)
 	dir := worktreeDir(projectRoot, id)
 
 	if _, err := git(projectRoot, "merge", "--ff-only", branch); err != nil {
-		return fmt.Errorf("fast-forward merging %s: %w", branch, err)
+		mainHead, headErr := git(projectRoot, "rev-parse", "HEAD")
+		if headErr != nil {
+			return fmt.Errorf("resolving main HEAD after non-fast-forward merge of %s: %w", branch, headErr)
+		}
+		if _, rebaseErr := git(dir, "rebase", mainHead); rebaseErr != nil {
+			git(dir, "rebase", "--abort")
+			return fmt.Errorf("rebasing %s onto main (%s) after non-fast-forward merge: %w", branch, previewSHA(mainHead), rebaseErr)
+		}
+		if _, err := git(projectRoot, "merge", "--ff-only", branch); err != nil {
+			return fmt.Errorf("fast-forward merging %s after rebase onto %s: %w", branch, previewSHA(mainHead), err)
+		}
 	}
 	if _, err := git(projectRoot, "worktree", "remove", dir, "--force"); err != nil {
 		return fmt.Errorf("removing worktree %s: %w", dir, err)

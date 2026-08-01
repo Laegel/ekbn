@@ -65,11 +65,10 @@ type Config struct {
 	Roles         map[string]RoleConfig `yaml:"roles"`
 	SecurityPaths []string              `yaml:"security-paths"`
 	Flows         map[string]StageFlow  `yaml:"flows"`
-	// WIPLimit is currently clamped to 1 by the orchestrator regardless of
-	// this value: tickets run directly in the shared working directory (no
-	// per-ticket git worktree), so more than one in flight at once isn't
-	// safe. The field is kept for when branch/worktree-based concurrency
-	// returns.
+	// WIPLimit caps how many tickets the orchestrator runs at once. Each
+	// ticket gets its own git worktree/branch, so concurrent tickets are
+	// isolated from each other; merging back into main handles a sibling
+	// ticket having already advanced it (see mergeAndRemoveWorktree).
 	WIPLimit int `yaml:"wip-limit"`
 	// DoneOnCleanReview, if true, treats a clean code-review pass (no
 	// concrete findings, and no security findings if applicable) as

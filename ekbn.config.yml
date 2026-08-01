@@ -1,10 +1,8 @@
 theme: dark
 folder-name: .kanban
 port: 8091
-# Max cards actively in-progress at once. Tickets currently run directly in
-# this working directory (no per-ticket git worktree or branch), so only one
-# ticket may run at a time regardless of this value — it is clamped to 1
-# until branch/worktree-based concurrency is reintroduced.
+# Max cards actively in-progress at once. Each ticket runs in its own git
+# worktree/branch, so raising this lets multiple tickets run concurrently.
 wip-limit: 1
 # If true, a ticket with no Acceptance criteria of its own still goes
 # straight to done once it clears code review (and security review, if

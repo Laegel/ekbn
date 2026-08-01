@@ -222,6 +222,114 @@ func TestFix_MergeRemovesWorktreeAndBranch(t *testing.T) {
 	}
 }
 
+// TestFix_MergeRebasesOntoNewMainWhenSecondTicketFinishesLater is a narrow
+// unit test of mergeAndRemoveWorktree itself, with no agent/runCycle
+// machinery: two tickets' worktrees both branch from the same mainHead — the
+// situation any two tickets running concurrently are in. Ticket A merges
+// first (a trivial fast-forward); ticket B's branch is no longer a
+// fast-forward once A has landed, so its merge must rebase onto main's new
+// tip and retry rather than simply failing.
+func TestFix_MergeRebasesOntoNewMainWhenSecondTicketFinishesLater(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origWd) })
+	initGitRepo(t)
+	mainHead := gitOut(t, "rev-parse", "HEAD")
+
+	wtA, err := ensureWorktree(dir, "A", mainHead)
+	if err != nil {
+		t.Fatalf("ensureWorktree(A): %v", err)
+	}
+	mustWrite(t, filepath.Join(wtA, "fileA.txt"), "a\n")
+	if _, err := git(wtA, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(wtA, "commit", "-m", "A"); err != nil {
+		t.Fatal(err)
+	}
+
+	wtB, err := ensureWorktree(dir, "B", mainHead)
+	if err != nil {
+		t.Fatalf("ensureWorktree(B): %v", err)
+	}
+	mustWrite(t, filepath.Join(wtB, "fileB.txt"), "b\n")
+	if _, err := git(wtB, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(wtB, "commit", "-m", "B"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mergeAndRemoveWorktree(dir, "A"); err != nil {
+		t.Fatalf("merging A (trivial fast-forward): %v", err)
+	}
+	if err := mergeAndRemoveWorktree(dir, "B"); err != nil {
+		t.Fatalf("merging B should have rebased onto main and retried, got: %v", err)
+	}
+
+	if !fileExists(filepath.Join(dir, "fileA.txt")) {
+		t.Error("fileA.txt missing from main after both merges")
+	}
+	if !fileExists(filepath.Join(dir, "fileB.txt")) {
+		t.Error("fileB.txt missing from main after both merges")
+	}
+}
+
+// TestFix_MergeReturnsClearErrorOnRebaseConflict confirms a genuine conflict
+// between two concurrent tickets' changes is surfaced as an error rather
+// than silently resolved or corrupting the shared repo: the rebase aborts
+// cleanly, and the losing ticket's worktree/branch are left in place for a
+// human to resolve manually — nothing is discarded.
+func TestFix_MergeReturnsClearErrorOnRebaseConflict(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origWd) })
+	initGitRepo(t)
+	mustWrite(t, filepath.Join(dir, "shared.txt"), "base\n")
+	if _, err := git(dir, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(dir, "commit", "-m", "seed shared.txt"); err != nil {
+		t.Fatal(err)
+	}
+	mainHead := gitOut(t, "rev-parse", "HEAD")
+
+	wtA, err := ensureWorktree(dir, "A", mainHead)
+	if err != nil {
+		t.Fatalf("ensureWorktree(A): %v", err)
+	}
+	mustWrite(t, filepath.Join(wtA, "shared.txt"), "from-a\n")
+	if _, err := git(wtA, "commit", "-am", "A edits shared.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	wtB, err := ensureWorktree(dir, "B", mainHead)
+	if err != nil {
+		t.Fatalf("ensureWorktree(B): %v", err)
+	}
+	mustWrite(t, filepath.Join(wtB, "shared.txt"), "from-b\n")
+	if _, err := git(wtB, "commit", "-am", "B edits shared.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mergeAndRemoveWorktree(dir, "A"); err != nil {
+		t.Fatalf("merging A (trivial fast-forward): %v", err)
+	}
+
+	if err := mergeAndRemoveWorktree(dir, "B"); err == nil {
+		t.Fatal("expected an error when B's rebase conflicts with A's already-merged change")
+	}
+
+	if !fileExists(wtB) {
+		t.Error("ticket B's worktree should remain after a failed merge, not be discarded")
+	}
+	if out, _ := git(wtB, "status", "--short"); strings.Contains(out, "UU") {
+		t.Errorf("rebase conflict should have been aborted, not left unresolved: status %q", out)
+	}
+}
+
 // TestFix_DoneOnCleanReviewSkipsReviewStage confirms the opt-in
 // done-on-clean-review config flag lets a ticket with no Acceptance
 // criteria go straight to done on a clean reviewer pass, instead of
@@ -352,7 +460,13 @@ func TestFix_PreexistingUntrackedFileNotCommitted(t *testing.T) {
 // again, but merging one back into main on completion only handles a
 // fast-forward, which assumes tickets finish in the order they were
 // claimed — real concurrency needs its own conflict/rebase story first.
-func TestFix_WIPLimitClampedToOne(t *testing.T) {
+// TestFix_WIPLimitTwoRunsBothConcurrently confirms raising wip-limit actually
+// lets two tickets run in the same poll cycle — each in its own worktree —
+// and both reach their terminal state, including merging both commits back
+// into main (exercising mergeAndRemoveWorktree's rebase-retry path for
+// whichever of the two merges second, since both branch from the same
+// mainHead).
+func TestFix_WIPLimitTwoRunsBothConcurrently(t *testing.T) {
 	fixSetup(t, "exit 0")
 	fakeAgentAndReviewer(t, countingAgentBody(t), filepath.Join(t.TempDir(), "no-findings"))
 
@@ -366,8 +480,15 @@ func TestFix_WIPLimitClampedToOne(t *testing.T) {
 	if !fileExists(".kanban/250-review/a.md") {
 		t.Error("a.md did not reach 250-review")
 	}
-	if !fileExists(".kanban/100-todo/b.md") {
-		t.Error("b.md should still be in 100-todo — capacity should be clamped to 1 regardless of WIPLimit=2")
+	if !fileExists(".kanban/250-review/b.md") {
+		t.Error("b.md did not reach 250-review — both tickets should run concurrently with wip-limit 2")
+	}
+	log := gitOut(t, "log", "--oneline")
+	if !strings.Contains(log, "1: First") {
+		t.Errorf("main branch log should contain ticket 1's commit: %q", log)
+	}
+	if !strings.Contains(log, "2: Second") {
+		t.Errorf("main branch log should contain ticket 2's commit: %q", log)
 	}
 }
 
@@ -731,6 +852,50 @@ func TestFix_ReviewRoundsCycleThenBlock(t *testing.T) {
 	card = mustReadCard(t, ".kanban/400-blocked/card.md")
 	if card.Reason != "review-rounds-exhausted" {
 		t.Errorf("Reason = %q, want review-rounds-exhausted", card.Reason)
+	}
+}
+
+// TestFix_AgentErrorWithNoChangesCyclesThenBlocks guards against a real bug
+// hit live: an implementer agent that crashes before making any changes
+// (e.g. a resource conflict in the agent CLI itself) used to fall straight
+// into the generic "no changes to review" block, misreporting a system
+// failure as "nothing needed changing" — and the reviewer was never even
+// invoked. It should instead retry (cycle back to todo) the same bounded way
+// reviewer findings do, only blocking once that budget is exhausted.
+func TestFix_AgentErrorWithNoChangesCyclesThenBlocks(t *testing.T) {
+	fixSetup(t, "exit 0")
+	fakeAgentAndReviewer(t, "  exit 1", filepath.Join(t.TempDir(), "no-findings"))
+
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "7")
+	cfg := loadTestConfig(t) // max_rounds: 2 for the "work" stage
+
+	runCycle(cfg) // attempt 1: agent errors out, no changes -> cycle back to todo
+	if !fileExists(".kanban/100-todo/card.md") {
+		t.Fatal("a ticket whose agent errored out with no changes should cycle back to todo for a retry, not go to the reviewer or block")
+	}
+	card := mustReadCard(t, ".kanban/100-todo/card.md")
+	if card.Status != model.StatusTodo {
+		t.Errorf("Status = %q, want %q", card.Status, model.StatusTodo)
+	}
+	if card.Round != 1 {
+		t.Errorf("Round = %d, want 1", card.Round)
+	}
+	if !strings.Contains(card.Content, "exited with an error") {
+		t.Error("the agent's crash output was not written back onto the card")
+	}
+
+	runCycle(cfg) // attempt 2: still within max_rounds (2) -> cycles again
+	if !fileExists(".kanban/100-todo/card.md") {
+		t.Fatal("should still cycle back for attempt 2 — max_rounds is 2")
+	}
+
+	runCycle(cfg) // attempt 3: exceeds max_rounds -> blocked
+	if !fileExists(".kanban/400-blocked/card.md") {
+		t.Fatal("card should be blocked once the agent-error retry budget is exhausted")
+	}
+	card = mustReadCard(t, ".kanban/400-blocked/card.md")
+	if card.Reason != "agent-error-rounds-exhausted" {
+		t.Errorf("Reason = %q, want agent-error-rounds-exhausted", card.Reason)
 	}
 }
 

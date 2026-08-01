@@ -114,13 +114,13 @@ func runCycle(cfg serve.Config) {
 		log.error("Failed to load cards: %v", err)
 		return
 	}
-	// Clamped to 1 regardless of cfg.WIPLimit: each ticket now runs in its
-	// own git worktree/branch again, but the merge-on-terminal-state step
-	// only handles a fast-forward — it assumes every ticket branches from
-	// main's current HEAD and finishes before the next one starts. Raising
-	// this needs a real rebase/conflict story for merges that no longer land
-	// in the order tickets were claimed; that's the next step, not this one.
-	capacity := min(1, cfg.WIPLimit) - countInProgress(cards)
+	// Each ticket runs in its own git worktree/branch, so concurrent tickets
+	// don't touch each other's working directories. The merge-on-terminal-
+	// state step (mergeAndRemoveWorktree) handles the case where a sibling
+	// ticket already advanced main past this ticket's base by rebasing onto
+	// main's new tip and retrying the fast-forward, so cfg.WIPLimit can be
+	// honored directly rather than forced to 1.
+	capacity := cfg.WIPLimit - countInProgress(cards)
 	ready := selectReadyTickets(cards, capacity)
 	log.info("Poll cycle: %d cards loaded, %d in progress, capacity %d, %d ready", len(cards), countInProgress(cards), capacity, len(ready))
 	if len(ready) == 0 {

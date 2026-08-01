@@ -402,7 +402,9 @@ func runTicket(cfg serve.Config, card model.Card) {
 	column = newColumn
 	path := filepath.Join(kanbanRoot, column, filename)
 
+	mainCheckoutMu.Lock()
 	mainHead, headErr := git(projectRoot, "rev-parse", "HEAD")
+	mainCheckoutMu.Unlock()
 	if headErr != nil {
 		log.warn("Ticket #%s: failed to resolve HEAD for base_sha (%v) — cumulative review diff will fall back to per-commit for this round", id, headErr)
 	}
@@ -484,11 +486,16 @@ func runTicket(cfg serve.Config, card model.Card) {
 	prompt := buildSystemPrompt(path, card, rc, flow) + "\n\n---\n\n" + noChangesInstruction
 
 	preexisting := untrackedFiles(workDir)
+	mainCheckoutMu.Lock()
 	mainBefore, _ := git(projectRoot, "status", "--short")
+	mainCheckoutMu.Unlock()
 
 	output, agentErr, usedGit, timedOut := runAgentAttempt(prompt, workDir, rc.Command, rc.MaxDurationMinutes)
 
-	if escErr := checkMainCheckoutUntouched(projectRoot, mainBefore); escErr != nil {
+	mainCheckoutMu.Lock()
+	escErr := checkMainCheckoutUntouched(projectRoot, mainBefore)
+	mainCheckoutMu.Unlock()
+	if escErr != nil {
 		log.error("✋  Ticket #%s: %v — the agent likely escaped its worktree", id, escErr)
 		abandonAttempt(workDir, id, column, filename, preexisting)
 		transitionBlockedWithFindings(column, filename, "agent-escaped-worktree", escErr.Error())
@@ -627,7 +634,7 @@ func runTicket(cfg serve.Config, card model.Card) {
 			}
 			if err := mergeAndRemoveWorktree(projectRoot, id); err != nil {
 				log.error("Failed to merge ticket #%s's work into main: %v", id, err)
-				transitionBlocked(column, filename, "merge-not-fast-forward")
+				transitionBlockedWithFindings(column, filename, "merge-not-fast-forward", err.Error())
 				return
 			}
 			withCard(column, filename, func(c *model.Card) { c.Worktree = "" })
@@ -636,6 +643,26 @@ func runTicket(cfg serve.Config, card model.Card) {
 				return
 			}
 			transitionReview(column, filename, "no-changes-needed", "no-changes-needed")
+			return
+		}
+		// An agent that exited with an error before touching anything never
+		// got to attempt the work at all — the reviewer has nothing to review
+		// and blocking immediately would misreport a system failure (a crashed
+		// CLI, a resource conflict) as "nothing needed changing." Retry it the
+		// same bounded way a reviewer's findings would, instead.
+		if agentErr != nil {
+			round := card.Round + 1
+			if round > flow.MaxRounds {
+				log.warn("🔒  Ticket #%s exhausted its %d attempt budget — the agent kept erroring out before making any changes", id, flow.MaxRounds)
+				transitionBlockedWithFindings(column, filename, "agent-error-rounds-exhausted",
+					fmt.Sprintf("The agent exited with an error (exit code %d) and made no changes, on every attempt up to this stage's %d-round budget. Its last output:\n\n%s",
+						exitCode(agentErr), flow.MaxRounds, previewText(output, 2000)))
+				return
+			}
+			log.warn("🔁  Ticket #%s's agent exited with an error (exit code %d) before making any changes (attempt %d/%d) — retrying", id, exitCode(agentErr), round, flow.MaxRounds)
+			cycleForReview(column, filename, round,
+				fmt.Sprintf("Attempt %d exited with an error (exit code %d) before making any changes — retrying automatically:\n\n%s",
+					round, exitCode(agentErr), previewText(output, 2000)))
 			return
 		}
 		log.warn("✋  Ticket #%s has no changes to review since this stage began — blocking for human review", id)
@@ -725,7 +752,7 @@ func runTicket(cfg serve.Config, card model.Card) {
 
 	if err := mergeAndRemoveWorktree(projectRoot, id); err != nil {
 		log.error("Failed to merge ticket #%s's work into main: %v", id, err)
-		transitionBlocked(column, filename, "merge-not-fast-forward")
+		transitionBlockedWithFindings(column, filename, "merge-not-fast-forward", err.Error())
 		return
 	}
 	withCard(column, filename, func(c *model.Card) { c.Worktree = "" })
