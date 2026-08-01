@@ -826,6 +826,25 @@ func TestFix_BuildSystemPromptFallsBackToDotAgentsDir(t *testing.T) {
 	}
 }
 
+// TestFix_PromptExplicitlyForbidsMutatingGit guards against a real gap: the
+// agent only ever discovered the git restriction reactively, by tripping the
+// read-only git shim and getting the whole ticket blocked outright with no
+// chance to correct course. The prompt should say so upfront instead.
+func TestFix_PromptExplicitlyForbidsMutatingGit(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origWd) })
+
+	prompt := buildSystemPrompt("card.md", model.Card{}, serve.RoleConfig{}, serve.StageFlow{})
+	if !strings.Contains(prompt, "Do not run git commands that write or mutate") {
+		t.Errorf("prompt should explicitly forbid mutating git commands, got: %q", prompt)
+	}
+	if !strings.Contains(prompt, "status") || !strings.Contains(prompt, "diff") {
+		t.Errorf("prompt should name at least some allowed read-only git subcommands, got: %q", prompt)
+	}
+}
+
 // TestFix_NoChangesNeededInstructionIsStageAware guards against a real bug:
 // the implementer's final stage often has nothing left to change (earlier
 // stages already did the work), but a generic "say so if nothing needs to

@@ -76,6 +76,11 @@ func buildSystemPrompt(ticketPath string, card model.Card, rc serve.RoleConfig, 
 	if len(rc.Skills) > 0 {
 		parts = append(parts, "Skills: "+strings.Join(rc.Skills, ", "))
 	}
+	parts = append(parts, "Do not run git commands that write or mutate this repository or its history "+
+		"(add, commit, checkout, reset, merge, rebase, push, branch, worktree, ...) — only read-only "+
+		"inspection is permitted (e.g. "+strings.Join(readOnlyGitSubcommands, ", ")+"). Ekbn stages and "+
+		"commits your changes automatically once you finish; running a disallowed git command blocks this "+
+		"ticket outright rather than giving you a chance to correct course.")
 	if card.Stage != "" && len(flow.Stages) > 0 {
 		parts = append(parts, fmt.Sprintf(
 			"You are working stage %q of this ticket's flow (%s). Only do the work that belongs to this stage — later stages are separate agent runs.",
