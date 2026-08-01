@@ -2,7 +2,5 @@ dist/
 node_modules/
 columns/
 /ekbn
-/plan
-/orchestrator
 specs/
 .kanban

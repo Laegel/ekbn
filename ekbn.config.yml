@@ -1,17 +1,125 @@
 theme: dark
 folder-name: .kanban
-port: 8089
+port: 8091
+# Max cards actively in-progress at once. Each ticket runs in its own git
+# worktree/branch, so raising this lets multiple tickets run concurrently.
+wip-limit: 1
+# If true, a ticket with no Acceptance criteria of its own still goes
+# straight to done once it clears code review (and security review, if
+# applicable) with zero concrete findings, instead of stopping at review for
+# a human to promote it manually. Off by default: a clean reviewer pass
+# isn't the same guarantee as a human confirming the change is right.
+# done-on-clean-review: true
+# Stage sequences, keyed by goal — not written into each card. Changing a
+# flow here changes it for every card with that goal, existing or new.
+flows:
+  bug:
+    stages: [reproduce, fix, verify]
+    max_rounds: 3
+  feature:
+    stages: [implement, gates, review]
+    max_rounds: 3
+  refactor:
+    stages: [tests-frozen, implement, verify-behavior]
+    max_rounds: 3
+  spike:
+    stages: [research]
+    max_rounds: 0
 prompt: |
   Available tools: list_columns, create_card
 
   Read the spec file, then:
   1. Call list_columns to discover the available columns
-  2. Break the spec into 2-8 tickets, ordered by dependency
+  2. Break the spec into tickets. Each ticket must be the largest chunk that
+     still has exactly one checkable outcome. Slice vertically — a ticket
+     must be independently verifiable end-to-end (e.g. "user can log in with
+     email and password") — never horizontally (never split "add the types",
+     "add the service", "add the route" into separate tickets: none of those
+     is checkable on its own). Create foundational tickets first.
   3. For each ticket, call create_card with:
       - column: <the column ID from step 1>
       - title: <3-8 word title>
       - content: <2-5 sentences describing the work and what "done" means>
       - priority: <0|1|2|3> (0=foundational, 1=high, 2=medium, 3=low)
+      - goal: <bug|feature|refactor|spike>, whichever this ticket actually is
+      - depends_on: <ids of tickets this one needs finished first — each
+        create_card response includes the new ticket's id, so reuse those ids
+        from earlier calls; omit if there are no dependencies>
+      - acceptance: <a command that proves the work is done, if one exists>
+      - unresolved: <if the spec leaves something about this ticket
+        undetermined, describe it here instead of guessing — do not resolve
+        an ambiguity by picking an answer yourself; leave blank only when the
+        spec is actually clear on this ticket>
 
   Do NOT create tickets for testing, docs, or CI unless the spec requires them.
   Do NOT read or modify files.
+# Per-role agent configuration. `tools` is advisory — it is rendered into the
+# agent's prompt, not enforced. Board access can be restricted with
+# `ekbn mcp --read-only`; ekbn doesn't start or configure any MCP server for
+# you, so wire that into your own agent CLI's MCP settings if you want
+# implementer/reviewer agents limited to read-only board tools.
+#
+# `command` is the full command line ekbn runs for this role — ekbn has no
+# built-in agent CLI. It is split on whitespace (no shell-quoting support)
+# and the ticket/review/spec prompt is appended as the final argument, e.g.
+# `command: opencode run -m anthropic/claude-sonnet-4-5 --dangerously-skip-permissions`
+# becomes `opencode run -m anthropic/claude-sonnet-4-5 --dangerously-skip-permissions "<prompt>"`.
+# The implementer's command may include the literal token `{workdir}`,
+# substituted with the ticket's actual worktree directory before the command
+# runs. This is needed on top of plain cwd for agent CLIs that resolve "the
+# project" through their own persistent state rather than the process's
+# working directory — e.g. `opencode run --dir {workdir} -m ...` — since cwd
+# alone silently let opencode operate on a remembered path instead.
+# Leaving `command` unset means nothing is invoked for that role at all: an
+# implementer ticket is blocked with reason `no-agent-command-configured`
+# rather than silently stuck; an unconfigured reviewer/security-reviewer gate
+# is skipped (treated as no findings); `specify` fails fast with a clear
+# error. `max_duration_minutes` is a hard cap: the orchestrator kills the
+# subprocess if it runs longer, and the ticket is marked budget-exhausted
+# rather than left to run indefinitely.
+#
+# `reviewer`, `security-reviewer`, and `specify` are conventional role names
+# looked up for the review stages and the `specify` command respectively —
+# they only ever set `command` (and `max_duration_minutes` for the
+# reviewers), since their prompts are fixed, not configurable.
+roles:
+  default:
+    prompt: |
+      You are a general-purpose implementation agent. Read the ticket
+      carefully and implement exactly what it describes.
+    tools:
+      - get_card
+    command: opencode run -m opencode/big-pickle
+    max_duration_minutes: 20
+  frontend:
+    prompt: |
+      You are a frontend specialist. Favor the existing component patterns
+      and styling conventions already used in this codebase.
+    tools:
+      - get_card
+    skills:
+      - react-patterns
+    command: opencode run -m opencode/big-pickle
+    max_duration_minutes: 20
+  backend:
+    prompt: |
+      You are a backend specialist. Favor the existing service and data
+      access patterns already used in this codebase.
+    tools:
+      - get_card
+    command: opencode run -m opencode/big-pickle
+    max_duration_minutes: 20
+  reviewer:
+    command: opencode run -m opencode/big-pickle
+  security-reviewer:
+    command: opencode run -m opencode/big-pickle
+  specify:
+    command: opencode run -m opencode/big-pickle
+security-paths:
+  - "**/rng/**"
+  - "**/drop*.ts"
+  - "**/pity/**"
+  - "**/battle-log/**"
+  - "**/auth/**"
+  - "**/session/**"
+  - "server/trpc/**"

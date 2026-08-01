@@ -1,4 +1,4 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache nodejs npm
 
@@ -11,21 +11,21 @@ RUN npm ci
 
 COPY . .
 RUN npm run build && \
-    CGO_ENABLED=0 go build -o /ekbn        . && \
-    CGO_ENABLED=0 go build -o /orchestrator ./cmd/orchestrator && \
-    CGO_ENABLED=0 go build -o /plan        ./cmd/plan
+    CGO_ENABLED=0 go build -o /ekbn .
 
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates libstdc++ libgcc
 
-COPY --from=builder /ekbn        /usr/local/bin/ekbn
-COPY --from=builder /orchestrator /usr/local/bin/orchestrator
-COPY --from=builder /plan        /usr/local/bin/plan
+COPY --from=builder /ekbn /usr/local/bin/ekbn
 COPY ekbn.config.yml custom.css /workspace/
 
 WORKDIR /workspace
 
 EXPOSE 8080
 
-ENTRYPOINT ["orchestrator"]
+# Headless service mode (no TUI — that needs a real TTY): starts the
+# orchestrator's polling loop plus the in-process HTTP kanban UI. For the
+# interactive TUI in a container, override with:
+#   docker run -it <image> ekbn
+ENTRYPOINT ["ekbn", "orchestrator"]

@@ -71,10 +71,11 @@ type e2eServer struct {
 // startE2EServer starts the ekbn mcp binary with a columns directory and
 // performs the MCP initialize handshake. The server is automatically killed
 // in t.Cleanup.
-func startE2EServer(t *testing.T, columnsDir string) *e2eServer {
+func startE2EServer(t *testing.T, columnsDir string, extraArgs ...string) *e2eServer {
 	t.Helper()
 
-	cmd := exec.Command(ekbnBinary, "mcp", "--columns", columnsDir)
+	args := append([]string{"mcp", "--columns", columnsDir}, extraArgs...)
+	cmd := exec.Command(ekbnBinary, args...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -269,7 +270,7 @@ func TestE2E_ListTools(t *testing.T) {
 	expected := []string{
 		"list_columns", "create_column", "create_card", "get_card",
 		"update_card", "delete_card", "move_card", "add_comment",
-		"reorder_column",
+		"reorder_column", "declare_blocked",
 	}
 
 	names := make(map[string]bool)
@@ -370,6 +371,49 @@ func TestE2E_CallTool_ListColumns(t *testing.T) {
 	text := extractText(result)
 	if !strings.Contains(text, "100-todo") {
 		t.Fatalf("list_columns should contain '100-todo', got: %s", text)
+	}
+}
+
+func TestE2E_ReadOnly_MoveCardRejected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
+	}
+
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "100-todo"), 0755)
+	os.MkdirAll(filepath.Join(dir, "200-in-progress"), 0755)
+	os.WriteFile(filepath.Join(dir, "100-todo", "card.md"), []byte("---\ntitle: Card\n---\n\nBody.\n"), 0644)
+
+	s := startE2EServer(t, dir, "--read-only")
+
+	listResp := s.listTools(t)
+	listResult, _ := listResp["result"].(map[string]any)
+	tools, _ := listResult["tools"].([]any)
+	names := make(map[string]bool)
+	for _, tool := range tools {
+		if m, ok := tool.(map[string]any); ok {
+			names[fmt.Sprintf("%v", m["name"])] = true
+		}
+	}
+	if len(names) != 3 || !names["list_columns"] || !names["get_card"] || !names["declare_blocked"] {
+		t.Fatalf("tools/list in --read-only mode = %v, want exactly {list_columns, get_card, declare_blocked}", names)
+	}
+
+	moveResp := s.callTool(t, "move_card", map[string]any{
+		"column":    "100-todo",
+		"filename":  "card.md",
+		"to_column": "200-in-progress",
+	})
+	result, _ := moveResp["result"].(map[string]any)
+	if result == nil {
+		t.Fatal("expected a tool result from move_card, got none")
+	}
+	isErr, _ := result["isError"].(bool)
+	if !isErr {
+		t.Fatal("move_card succeeded in --read-only mode, want it refused")
+	}
+	if !strings.Contains(strings.ToLower(extractText(result)), "read-only") {
+		t.Errorf("expected error message to mention read-only mode, got: %s", extractText(result))
 	}
 }
 

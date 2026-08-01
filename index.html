@@ -46,10 +46,22 @@
                     </datalist>
                 </div>
                 <div class="form-control mb-3">
-                    <label class="label cursor-pointer justify-start gap-2">
-                        <input type="checkbox" id="card-blocked-input" class="checkbox checkbox-error">
-                        <span class="label-text">Blocked</span>
+                    <label class="label">
+                        <span class="label-text">Goal</span>
                     </label>
+                    <select id="card-goal-input" class="select select-bordered w-full">
+                        <option value="">(none — default flow)</option>
+                        <option value="feature">feature</option>
+                        <option value="bug">bug</option>
+                        <option value="refactor">refactor</option>
+                        <option value="spike">spike</option>
+                    </select>
+                </div>
+                <div class="form-control mb-3">
+                    <label class="label">
+                        <span class="label-text">Acceptance check</span>
+                    </label>
+                    <input type="text" id="card-acceptance-input" class="input input-bordered w-full" placeholder="e.g. npm test -- auth.spec.ts">
                 </div>
                 <div class="form-control mb-3">
                     <label class="label">

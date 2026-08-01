@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [],
+  "mcp": {
+    "ekbn": {
+      "type": "local",
+      "command": [
+        "ekbn",
+        "mcp",
+        "--read-only"
+      ],
+      "enabled": true
+    }
+  }
+}

@@ -37,12 +37,50 @@ func extractArg(args map[string]any, key string) (string, error) {
 
 type EKBNServer struct {
 	ColumnsDir string
+	ReadOnly   bool
 	server     *server.MCPServer
 }
 
-func New(columnsDir string) *EKBNServer {
+func New(columnsDir string, readOnly bool) *EKBNServer {
 	return &EKBNServer{
 		ColumnsDir: columnsDir,
+		ReadOnly:   readOnly,
+	}
+}
+
+// mutatingTools is the single source of truth for which tools write to the
+// board. Both readOnlyToolFilter and readOnlyMiddleware key off this map so
+// the two can't drift out of sync.
+var mutatingTools = map[string]bool{
+	"create_column":  true,
+	"create_card":    true,
+	"update_card":    true,
+	"delete_card":    true,
+	"move_card":      true,
+	"add_comment":    true,
+	"reorder_column": true,
+}
+
+// readOnlyToolFilter hides mutating tools from tools/list, so a read-only
+// agent never even sees them as available.
+func readOnlyToolFilter(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
+	filtered := make([]mcp.Tool, 0, len(tools))
+	for _, t := range tools {
+		if !mutatingTools[t.Name] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+// readOnlyMiddleware refuses any direct call to a mutating tool, even one
+// bypassing tools/list — defense in depth alongside readOnlyToolFilter.
+func readOnlyMiddleware(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if mutatingTools[req.Params.Name] {
+			return mcp.NewToolResultError(fmt.Sprintf("%s is disabled: server is running in read-only mode", req.Params.Name)), nil
+		}
+		return next(ctx, req)
 	}
 }
 
@@ -51,12 +89,16 @@ func (e *EKBNServer) MCPServer() *server.MCPServer {
 		return e.server
 	}
 
-	s := server.NewMCPServer(
-		"ekbn",
-		"1.0.0",
+	opts := []server.ServerOption{
 		server.WithResourceCapabilities(true, true),
 		server.WithInstructions("A kanban board server for managing columns and cards."),
-	)
+	}
+	if e.ReadOnly {
+		opts = append(opts, server.WithToolFilter(readOnlyToolFilter))
+		opts = append(opts, server.WithToolHandlerMiddleware(readOnlyMiddleware))
+	}
+
+	s := server.NewMCPServer("ekbn", "1.0.0", opts...)
 
 	e.registerTools(s)
 	e.registerResources(s)
@@ -104,10 +146,23 @@ func (e *EKBNServer) registerTools(s *server.MCPServer) {
 			mcp.Description("Priority level (higher = more important)"),
 		),
 		mcp.WithString("role",
-			mcp.Description("Role responsible for the card (e.g. 'dev', 'qa', 'design')"),
+			mcp.Description("Role responsible for the card, from the roles configured in ekbn.config.yml (e.g. 'frontend', 'backend')"),
 		),
-		mcp.WithBoolean("blocked",
-			mcp.Description("Whether the card is blocked"),
+		mcp.WithString("spec",
+			mcp.Description("Filename of the spec this card was decomposed from"),
+		),
+		mcp.WithString("goal",
+			mcp.Description("Work-item type driving its stage flow: bug, feature, refactor, or spike"),
+		),
+		mcp.WithArray("depends_on",
+			mcp.WithStringItems(),
+			mcp.Description("IDs of cards that must reach status=done before this one is ready"),
+		),
+		mcp.WithString("acceptance",
+			mcp.Description("Acceptance check for this card — a command to run, or criteria written in prose"),
+		),
+		mcp.WithString("unresolved",
+			mcp.Description("If the spec left something about this ticket undetermined, describe it here instead of guessing — a non-empty value keeps the card out of the ready set until a human clears it"),
 		),
 		mcp.WithArray("categories",
 			mcp.WithStringItems(),
@@ -153,8 +208,18 @@ func (e *EKBNServer) registerTools(s *server.MCPServer) {
 		mcp.WithString("role",
 			mcp.Description("New role"),
 		),
-		mcp.WithBoolean("blocked",
-			mcp.Description("New blocked status"),
+		mcp.WithString("goal",
+			mcp.Description("New goal (bug, feature, refactor, spike)"),
+		),
+		mcp.WithArray("depends_on",
+			mcp.WithStringItems(),
+			mcp.Description("New list of dependency card IDs"),
+		),
+		mcp.WithString("acceptance",
+			mcp.Description("New acceptance check"),
+		),
+		mcp.WithString("unresolved",
+			mcp.Description("New unresolved-question note; clear it (pass an empty string) once the spec's ambiguity has been settled by a human"),
 		),
 		mcp.WithArray("categories",
 			mcp.WithStringItems(),
@@ -163,6 +228,24 @@ func (e *EKBNServer) registerTools(s *server.MCPServer) {
 	)
 
 	s.AddTool(updateCardTool, e.handleUpdateCard)
+
+	declareBlockedTool := mcp.NewTool("declare_blocked",
+		mcp.WithDescription("Declare that the current card cannot proceed. This is the only status-changing tool available to a read-only agent: it sets status=blocked and records why, on the card itself, without granting general write access to card content."),
+		mcp.WithString("column",
+			mcp.Required(),
+			mcp.Description("Column containing the card"),
+		),
+		mcp.WithString("filename",
+			mcp.Required(),
+			mcp.Description("Filename of the card to block"),
+		),
+		mcp.WithString("reason",
+			mcp.Required(),
+			mcp.Description("Why the card is blocked"),
+		),
+	)
+
+	s.AddTool(declareBlockedTool, e.handleDeclareBlocked)
 
 	deleteCardTool := mcp.NewTool("delete_card",
 		mcp.WithDescription("Delete a card"),
@@ -288,13 +371,19 @@ func (e *EKBNServer) handleCreateCard(ctx context.Context, req mcp.CallToolReque
 	column, _ := req.RequireString("column")
 	title, _ := req.RequireString("title")
 
-	content := req.GetString("content", "")
-	categories := req.GetStringSlice("categories", nil)
-	priority := req.GetInt("priority", 0)
-	role := req.GetString("role", "")
-	blocked := req.GetBool("blocked", false)
-
-	filename, err := model.CreateCard(e.ColumnsDir, column, title, "mcp", content, categories, priority, role, blocked)
+	filename, err := model.CreateCard(e.ColumnsDir, column, model.CardFields{
+		Title:      title,
+		Author:     "mcp",
+		Content:    req.GetString("content", ""),
+		Categories: req.GetStringSlice("categories", nil),
+		Priority:   req.GetInt("priority", 0),
+		Role:       req.GetString("role", ""),
+		Spec:       req.GetString("spec", ""),
+		Goal:       req.GetString("goal", ""),
+		DependsOn:  req.GetStringSlice("depends_on", nil),
+		Acceptance: req.GetString("acceptance", ""),
+		Unresolved: req.GetString("unresolved", ""),
+	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to create card: %v", err)), nil
 	}
@@ -324,19 +413,36 @@ func (e *EKBNServer) handleUpdateCard(ctx context.Context, req mcp.CallToolReque
 	column, _ := req.RequireString("column")
 	filename, _ := req.RequireString("filename")
 
-	if err := model.UpdateCard(
-		e.ColumnsDir, column, filename,
-		req.GetString("title", ""),
-		req.GetString("content", ""),
-		req.GetStringSlice("categories", nil),
-		req.GetInt("priority", 0),
-		req.GetString("role", ""),
-		req.GetBool("blocked", false),
-	); err != nil {
+	if err := model.UpdateCard(e.ColumnsDir, column, filename, model.CardFields{
+		Title:      req.GetString("title", ""),
+		Content:    req.GetString("content", ""),
+		Categories: req.GetStringSlice("categories", nil),
+		Priority:   req.GetInt("priority", 0),
+		Role:       req.GetString("role", ""),
+		Goal:       req.GetString("goal", ""),
+		DependsOn:  req.GetStringSlice("depends_on", nil),
+		Acceptance: req.GetString("acceptance", ""),
+		Unresolved: req.GetString("unresolved", ""),
+	}); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to update card: %v", err)), nil
 	}
 
 	return mcp.NewToolResultText(fmt.Sprintf("Updated card %s in column %s", filename, column)), nil
+}
+
+// handleDeclareBlocked is intentionally not in mutatingTools: it is the one
+// write path a read-only agent retains, scoped to exactly one field pair
+// (status=blocked, reason) rather than general card content.
+func (e *EKBNServer) handleDeclareBlocked(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	column, _ := req.RequireString("column")
+	filename, _ := req.RequireString("filename")
+	reason, _ := req.RequireString("reason")
+
+	if _, err := model.TransitionStatus(e.ColumnsDir, column, filename, model.StatusBlocked, reason); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to declare blocked: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Card %s in column %s marked blocked: %s", filename, column, reason)), nil
 }
 
 func (e *EKBNServer) handleDeleteCard(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
