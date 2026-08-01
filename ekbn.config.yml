@@ -90,7 +90,7 @@ roles:
       carefully and implement exactly what it describes.
     tools:
       - get_card
-    command: opencode run -m opencode/big-pickle
+    command: opencode run -m opencode/big-pickle --continue
     max_duration_minutes: 20
   frontend:
     prompt: |
@@ -100,7 +100,7 @@ roles:
       - get_card
     skills:
       - react-patterns
-    command: opencode run -m opencode/big-pickle
+    command: opencode run -m opencode/big-pickle --continue
     max_duration_minutes: 20
   backend:
     prompt: |
@@ -108,15 +108,15 @@ roles:
       access patterns already used in this codebase.
     tools:
       - get_card
-    command: opencode run -m opencode/big-pickle
+    command: opencode run -m opencode/big-pickle --continue
     max_duration_minutes: 20
     idle_timeout_minutes: 5
   reviewer:
-    command: opencode run -m opencode/big-pickle
+    command: opencode run -m opencode/big-pickle --continue
   security-reviewer:
-    command: opencode run -m opencode/big-pickle
+    command: opencode run -m opencode/big-pickle --continue
   specify:
-    command: opencode run -m opencode/big-pickle
+    command: opencode run -m opencode/big-pickle --continue
 security-paths:
   - "**/rng/**"
   - "**/drop*.ts"
