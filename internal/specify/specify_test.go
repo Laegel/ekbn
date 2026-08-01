@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"ekbn/internal/serve"
 	"ekbn/model"
 )
 
@@ -259,7 +260,7 @@ func TestProcessSpec_RerunIsRefusedThenForced(t *testing.T) {
 	os.WriteFile(specPath, []byte("Add onboarding."), 0644)
 
 	ctx := context.Background()
-	processSpec(ctx, specPath, nil, defaultPrompt, "opencode", false, io.Discard)
+	processSpec(ctx, specPath, nil, defaultPrompt, serve.CommandSpec{Program: "opencode"}, false, io.Discard)
 	calls, _ := os.ReadFile(callsFile)
 	if n := len(strings.Fields(string(calls))); n != 1 {
 		t.Fatalf("agent invoked %d times on first run, want 1", n)
@@ -270,7 +271,7 @@ func TestProcessSpec_RerunIsRefusedThenForced(t *testing.T) {
 
 	// Re-create a spec with the same name (simulating a copy/edit) and try again without -force.
 	os.WriteFile(specPath, []byte("Add onboarding."), 0644)
-	processSpec(ctx, specPath, nil, defaultPrompt, "opencode", false, io.Discard)
+	processSpec(ctx, specPath, nil, defaultPrompt, serve.CommandSpec{Program: "opencode"}, false, io.Discard)
 	calls, _ = os.ReadFile(callsFile)
 	if n := len(strings.Fields(string(calls))); n != 1 {
 		t.Errorf("agent invoked %d times after an unforced re-run, want 1 (refused)", n)
@@ -280,7 +281,7 @@ func TestProcessSpec_RerunIsRefusedThenForced(t *testing.T) {
 	}
 
 	// With -force, it should actually reprocess.
-	processSpec(ctx, specPath, nil, defaultPrompt, "opencode", true, io.Discard)
+	processSpec(ctx, specPath, nil, defaultPrompt, serve.CommandSpec{Program: "opencode"}, true, io.Discard)
 	calls, _ = os.ReadFile(callsFile)
 	if n := len(strings.Fields(string(calls))); n != 2 {
 		t.Errorf("agent invoked %d times after a forced re-run, want 2", n)

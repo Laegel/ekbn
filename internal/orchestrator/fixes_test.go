@@ -37,7 +37,7 @@ func fixSetup(t *testing.T, verify string) string {
 // fakeAgentAndReviewer), distinguished by a marker argument the shim itself
 // checks — "implement" vs "review" — since that's now entirely up to
 // whatever command each role configures, not a flag ekbn adds.
-const testRolesConfig = "executors:\n  implement-exec:\n    command: opencode implement\n  review-exec:\n    command: opencode review\n" +
+const testRolesConfig = "executors:\n  implement-exec:\n    command:\n      program: opencode\n      args: [implement]\n  review-exec:\n    command:\n      program: opencode\n      args: [review]\n" +
 	"roles:\n  default:\n    executor: implement-exec\n  reviewer:\n    executor: review-exec\n"
 
 // fakeAgentAndReviewer installs an "opencode" shim on PATH serving both
@@ -200,7 +200,7 @@ func TestFix_RunAgentAttemptSubstitutesWorkdirTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := filepath.Join(helperDir, "fakecmd") + " {workdir}"
+	command := serve.CommandSpec{Program: filepath.Join(helperDir, "fakecmd"), Args: []string{"{workdir}"}}
 	if _, err, _, _, _, _ := runAgentAttempt("prompt", dir, command, 0, 0); err != nil {
 		t.Fatalf("runAgentAttempt failed: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	command := filepath.Join(helperDir, "stallcmd")
+	command := serve.CommandSpec{Program: filepath.Join(helperDir, "stallcmd")}
 	start := time.Now()
 	output, _, _, _, timedOut, idleTimedOut := runAgentAttempt("prompt", dir, command, 0, 100*time.Millisecond)
 	elapsed := time.Since(start)
@@ -803,7 +803,7 @@ const idleStallAgentBody = "  sleep 90"
 // prove the actual config -> kill -> retry path, on top of the fast,
 // sub-second unit test of the watchdog mechanism itself
 // (TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall).
-const idleTimeoutRoleConfig = "executors:\n  implement-exec:\n    command: opencode implement\n    idle_timeout_minutes: 1\n  review-exec:\n    command: opencode review\n" +
+const idleTimeoutRoleConfig = "executors:\n  implement-exec:\n    command:\n      program: opencode\n      args: [implement]\n    idle_timeout_minutes: 1\n  review-exec:\n    command:\n      program: opencode\n      args: [review]\n" +
 	"roles:\n  default:\n    executor: implement-exec\n  reviewer:\n    executor: review-exec\n"
 
 // TestFix_IdleStallCyclesBackToTodo confirms a stalled agent (no output at

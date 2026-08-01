@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -141,7 +142,7 @@ func TestIsConcreteSecurityFinding(t *testing.T) {
 func TestResolveExecutor(t *testing.T) {
 	cfg := serve.Config{
 		Executors: map[string]serve.ExecutorConfig{
-			"main": {Command: "opencode run"},
+			"main": {Command: serve.CommandSpec{Program: "opencode", Args: []string{"run"}}},
 		},
 		Roles: map[string]serve.RoleConfig{
 			"default":  {Prompt: "You are a general-purpose agent.", Executor: "main"},
@@ -160,8 +161,9 @@ func TestResolveExecutor(t *testing.T) {
 		if rc.Prompt != "You are a frontend specialist." {
 			t.Errorf("rc.Prompt = %q, want the frontend prompt", rc.Prompt)
 		}
-		if ec.Command != "opencode run" {
-			t.Errorf("ec.Command = %q, want the resolved executor's command", ec.Command)
+		want := serve.CommandSpec{Program: "opencode", Args: []string{"run"}}
+		if !reflect.DeepEqual(ec.Command, want) {
+			t.Errorf("ec.Command = %+v, want %+v", ec.Command, want)
 		}
 	})
 
@@ -202,8 +204,8 @@ func TestResolveExecutor(t *testing.T) {
 		if rc.Prompt != "" || len(rc.Tools) != 0 || len(rc.Skills) != 0 {
 			t.Errorf("rc = %+v, want zero value when roles is unconfigured", rc)
 		}
-		if ec.Command != "" {
-			t.Errorf("ec.Command = %q, want empty when roles is unconfigured", ec.Command)
+		if ec.Command.Program != "" || len(ec.Command.Args) != 0 {
+			t.Errorf("ec.Command = %+v, want zero value when roles is unconfigured", ec.Command)
 		}
 	})
 

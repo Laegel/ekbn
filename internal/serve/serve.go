@@ -21,26 +21,37 @@ import (
 	"ekbn/model"
 )
 
+// CommandSpec is an argv-list agent CLI invocation: Program is the
+// executable, Args its arguments, kept separate instead of a single
+// shell-string so ekbn never has to re-implement shell quoting/splitting
+// itself (see BuildArgv) — a bug found live: `sh -c 'touch file.txt'` broke
+// under whitespace-splitting because there was no way to keep `touch
+// file.txt` together as one argument.
+type CommandSpec struct {
+	Program string   `yaml:"program"`
+	Args    []string `yaml:"args,omitempty"`
+}
+
 // ExecutorConfig is a named, reusable agent CLI invocation — how a role's
 // work actually gets run, kept separate from what capability the role
-// represents. Command is the full command line to run — ekbn has no
-// built-in agent CLI: it splits Command into argv, appends the prompt as
-// the final argument, and execs it. MaxDurationMinutes is enforced by the
-// orchestrator killing the subprocess (see runAgentAttempt) — the one
-// budget dimension ekbn can enforce itself without depending on any
-// particular CLI's own accounting. IdleTimeoutMinutes kills the agent early
-// if it produces no new output (nothing written to stdout/stderr) for this
-// many minutes — distinct from MaxDurationMinutes, which caps total runtime
-// regardless of whether the process is actively working. A CLI that stalls
-// (goes silent without crashing or finishing) is treated as a transient
-// glitch worth retrying, the same bounded way a reviewer's findings cycle a
-// ticket back for another attempt; a genuine MaxDurationMinutes timeout
-// still goes straight to budget-exhausted for a human. 0/unset disables
-// idle detection, the same convention as MaxDurationMinutes.
+// represents. Command is an explicit argv (see CommandSpec/BuildArgv), with
+// the prompt appended as the final argument before ekbn execs it — ekbn has
+// no built-in agent CLI. MaxDurationMinutes is enforced by the orchestrator
+// killing the subprocess (see runAgentAttempt) — the one budget dimension
+// ekbn can enforce itself without depending on any particular CLI's own
+// accounting. IdleTimeoutMinutes kills the agent early if it produces no
+// new output (nothing written to stdout/stderr) for this many minutes —
+// distinct from MaxDurationMinutes, which caps total runtime regardless of
+// whether the process is actively working. A CLI that stalls (goes silent
+// without crashing or finishing) is treated as a transient glitch worth
+// retrying, the same bounded way a reviewer's findings cycle a ticket back
+// for another attempt; a genuine MaxDurationMinutes timeout still goes
+// straight to budget-exhausted for a human. 0/unset disables idle
+// detection, the same convention as MaxDurationMinutes.
 type ExecutorConfig struct {
-	Command            string `yaml:"command"`
-	MaxDurationMinutes int    `yaml:"max_duration_minutes"`
-	IdleTimeoutMinutes int    `yaml:"idle_timeout_minutes"`
+	Command            CommandSpec `yaml:"command"`
+	MaxDurationMinutes int         `yaml:"max_duration_minutes"`
+	IdleTimeoutMinutes int         `yaml:"idle_timeout_minutes"`
 }
 
 // RoleConfig defines a capability (what the agent should do and with what

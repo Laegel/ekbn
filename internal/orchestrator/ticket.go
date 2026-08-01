@@ -123,7 +123,7 @@ var readOnlyGitSubcommands = []string{
 	"config", "symbolic-ref", "remote", "for-each-ref", "check-ignore",
 }
 
-func runAgentAttempt(prompt, dir, command string, maxDuration, idleTimeout time.Duration) (output string, runErr error, usedGit bool, usedGitCmd string, timedOut, idleTimedOut bool) {
+func runAgentAttempt(prompt, dir string, command serve.CommandSpec, maxDuration, idleTimeout time.Duration) (output string, runErr error, usedGit bool, usedGitCmd string, timedOut, idleTimedOut bool) {
 	shimDir, mkErr := os.MkdirTemp("", "ekbn-git-shim-")
 	env := os.Environ()
 	marker := ""
@@ -201,13 +201,11 @@ exit 1
 	// process cwd — e.g. keyed off the repo's shared git commondir, which is
 	// identical for a worktree and the main checkout — and silently operate
 	// on a remembered path instead of dir. {workdir} lets a role's command
-	// pass dir explicitly (e.g. `opencode run --dir {workdir} ...`) to any
+	// pass dir explicitly (e.g. `args: [--dir, "{workdir}", ...]`) to any
 	// CLI that supports it, without ekbn hardcoding a specific tool's flag.
-	command = strings.ReplaceAll(command, "{workdir}", dir)
-	argv := strings.Fields(command)
-	args := append(append([]string{}, argv[1:]...), prompt)
+	program, args := serve.BuildArgv(command, dir, prompt)
 
-	cmd := exec.CommandContext(ctx, argv[0], args...)
+	cmd := exec.CommandContext(ctx, program, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	// A killed direct child (a shell script, typically) can leave its own
@@ -663,7 +661,7 @@ func runImplementState(cfg serve.Config, flow serve.Flow, stateName string, stat
 			log.warn("Ticket #%s has role %q, which is not configured — using default agent", id, roleName)
 		}
 	}
-	if strings.TrimSpace(ec.Command) == "" {
+	if strings.TrimSpace(ec.Command.Program) == "" {
 		log.warn("✗  Ticket #%s: no agent command configured for role %q — blocking", id, orDefault(roleName, "default"))
 		transitionBlocked(column, filename, "no-agent-command-configured")
 		return
@@ -846,7 +844,7 @@ func runSpike(cfg serve.Config, path, column, filename string, card model.Card, 
 	if fellBack {
 		log.warn("Ticket #%s (spike) has no matching role — using default agent", id)
 	}
-	if strings.TrimSpace(ec.Command) == "" {
+	if strings.TrimSpace(ec.Command.Program) == "" {
 		log.warn("✗  Spike #%s: no agent command configured for role %q — blocking", id, orDefault(card.Role, "default"))
 		transitionBlocked(column, filename, "no-agent-command-configured")
 		return

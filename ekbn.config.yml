@@ -58,28 +58,34 @@ prompt: |
   Do NOT create tickets for testing, docs, or CI unless the spec requires them.
   Do NOT read or modify files.
 # Named, reusable agent CLI invocations — how work actually gets run, kept
-# separate from what a role represents. Command is the full command line
-# ekbn runs — ekbn has no built-in agent CLI. It is split on whitespace (no
-# shell-quoting support) and the ticket/review/spec prompt is appended as
-# the final argument, e.g. `command: opencode run -m anthropic/claude-sonnet-4-5`
-# becomes `opencode run -m anthropic/claude-sonnet-4-5 "<prompt>"`. May
-# include the literal token `{workdir}`, substituted with the ticket's
-# actual worktree directory before the command runs — needed on top of
-# plain cwd for agent CLIs that resolve "the project" through their own
-# persistent state rather than the process's working directory (e.g.
-# `opencode run --dir {workdir} -m ...`), since cwd alone silently let
-# opencode operate on a remembered path instead. `max_duration_minutes` is a
-# hard cap: the orchestrator kills the subprocess if it runs longer, and the
-# ticket is marked budget-exhausted rather than left to run indefinitely.
-# `idle_timeout_minutes` kills it earlier if it goes silent (no new output)
-# without crashing or finishing — treated as a transient stall worth
-# retrying, distinct from a genuine budget-exhausted timeout.
+# separate from what a role represents. `command` is an explicit argv —
+# `program` (the executable) plus an optional `args` list — not a shell
+# string: ekbn has no built-in agent CLI and never splits or shell-parses
+# anything, so an argument needing a literal space (e.g. `sh -c 'touch
+# file.txt'`) is just one string in `args:`, never something that needs
+# quoting. The ticket/review/spec prompt is appended as the final argv
+# element after `args`. Either `program` or any `args` element may contain
+# the literal token `{workdir}`, substituted with the ticket's actual
+# worktree directory before the command runs — needed on top of plain cwd
+# for agent CLIs that resolve "the project" through their own persistent
+# state rather than the process's working directory (e.g. `--dir {workdir}`
+# below), since cwd alone silently let opencode operate on a remembered path
+# instead. `max_duration_minutes` is a hard cap: the orchestrator kills the
+# subprocess if it runs longer, and the ticket is marked budget-exhausted
+# rather than left to run indefinitely. `idle_timeout_minutes` kills it
+# earlier if it goes silent (no new output) without crashing or finishing —
+# treated as a transient stall worth retrying, distinct from a genuine
+# budget-exhausted timeout.
 executors:
   big-pickle:
-    command: opencode run --dir {workdir} -m opencode/big-pickle
+    command:
+      program: opencode
+      args: [run, --dir, "{workdir}", -m, opencode/big-pickle]
     max_duration_minutes: 20
   big-pickle-review:
-    command: opencode run -m opencode/big-pickle
+    command:
+      program: opencode
+      args: [run, -m, opencode/big-pickle]
 # Per-role agent configuration: what capability the role represents, not how
 # it's run — a role names an Executor rather than embedding a command line,
 # so it can point at a different CLI later without becoming a different

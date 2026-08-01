@@ -71,18 +71,17 @@ func isConcreteReviewFinding(output string) bool {
 // no meaningful write access to the repo. command is the reviewer role's
 // configured command; callers only invoke this once they've confirmed it's
 // non-empty.
-func runReviewSession(prompt, command string) (output string, err error) {
+func runReviewSession(prompt string, command serve.CommandSpec) (output string, err error) {
 	tmpDir, mkErr := os.MkdirTemp("", "ekbn-review-")
 	if mkErr != nil {
 		return "", fmt.Errorf("create review dir: %w", mkErr)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	argv := strings.Fields(command)
-	args := append(append([]string{}, argv[1:]...), prompt)
-	log.info("   Reviewer command: %v (prompt %d bytes, cwd %s)", argv, len(prompt), tmpDir)
+	program, args := serve.BuildArgv(command, tmpDir, prompt)
+	log.info("   Reviewer command: %v (prompt %d bytes, cwd %s)", append([]string{program}, args...), len(prompt), tmpDir)
 
-	cmd := exec.Command(argv[0], args...)
+	cmd := exec.Command(program, args...)
 	cmd.Dir = tmpDir
 	var buf bytes.Buffer
 	cmd.Stdout = io.MultiWriter(os.Stdout, &buf)
@@ -103,7 +102,7 @@ func runReviewer(cfg serve.Config, ticketContent, diff string) (findings string,
 	if resolveErr != nil {
 		return "", resolveErr
 	}
-	if strings.TrimSpace(ec.Command) == "" {
+	if strings.TrimSpace(ec.Command.Program) == "" {
 		log.info("No reviewer command configured — skipping general review")
 		return "", nil
 	}
@@ -140,7 +139,7 @@ func runSecurityReviewer(cfg serve.Config, ticketContent, diff string) (findings
 	if resolveErr != nil {
 		return "", resolveErr
 	}
-	if strings.TrimSpace(ec.Command) == "" {
+	if strings.TrimSpace(ec.Command.Program) == "" {
 		log.info("No security-reviewer command configured — skipping security review")
 		return "", nil
 	}

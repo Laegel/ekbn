@@ -109,7 +109,7 @@ func Run(ctx context.Context, opts Options, out io.Writer) error {
 		return err
 	}
 	command := ec.Command
-	if strings.TrimSpace(command) == "" {
+	if strings.TrimSpace(command.Program) == "" {
 		return fmt.Errorf("no command configured — set roles.specify.executor or roles.default.executor in ekbn.config.yml")
 	}
 
@@ -148,7 +148,7 @@ func resolveSpecArgs(text string, fileArgs []string, out io.Writer) ([]string, e
 // forced, run the agent, validate the resulting dependency graph, and only
 // then archive the spec. Any failure along the way leaves the spec in place
 // rather than silently discarding or duplicating work.
-func processSpec(ctx context.Context, specArg string, roleNames []string, prompt, command string, force bool, out io.Writer) error {
+func processSpec(ctx context.Context, specArg string, roleNames []string, prompt string, command serve.CommandSpec, force bool, out io.Writer) error {
 	specPath, err := filepath.Abs(specArg)
 	if err != nil {
 		fmt.Fprintf(out, "Error resolving path %s: %v\n", specArg, err)
@@ -189,9 +189,8 @@ func processSpec(ctx context.Context, specArg string, roleNames []string, prompt
 	// any particular one.
 	fullPrompt := specPrompt(prompt, specName, roleNames) + "\n\n---\n\n## Spec\n\n" + string(specData)
 
-	argv := strings.Fields(command)
-	args := append(append([]string{}, argv[1:]...), fullPrompt)
-	cmd := exec.CommandContext(ctx, argv[0], args...)
+	program, args := serve.BuildArgv(command, "", fullPrompt)
+	cmd := exec.CommandContext(ctx, program, args...)
 	cmd.Stdout = out
 	cmd.Stderr = out
 
