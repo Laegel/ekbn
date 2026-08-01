@@ -1,6 +1,7 @@
 theme: dark
 folder-name: .kanban
 port: 8091
+verify: go test ./...
 # Max cards actively in-progress at once. Each ticket runs in its own git
 # worktree/branch, so raising this lets multiple tickets run concurrently.
 wip-limit: 1
