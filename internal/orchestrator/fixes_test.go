@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ekbn/internal/serve"
 	"ekbn/model"
@@ -153,7 +154,7 @@ func TestFix_RunAgentAttemptSubstitutesWorkdirTemplate(t *testing.T) {
 	}
 
 	command := filepath.Join(helperDir, "fakecmd") + " {workdir}"
-	if _, err, _, _ := runAgentAttempt("prompt", dir, command, 0); err != nil {
+	if _, err, _, _, _ := runAgentAttempt("prompt", dir, command, 0, 0); err != nil {
 		t.Fatalf("runAgentAttempt failed: %v", err)
 	}
 
@@ -163,6 +164,39 @@ func TestFix_RunAgentAttemptSubstitutesWorkdirTemplate(t *testing.T) {
 	}
 	if strings.TrimSpace(string(got)) != dir {
 		t.Errorf("{workdir} substituted to %q, want %q", strings.TrimSpace(string(got)), dir)
+	}
+}
+
+// TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall is the precise,
+// fast test of the idle watchdog mechanism itself: a shim that writes one
+// line then goes silent for far longer than idleTimeout must be killed
+// promptly (well before its own sleep would end), reported as idleTimedOut
+// (not timedOut — no maxDuration is set here at all), distinguishing "the
+// agent stopped producing output" from "the agent simply ran long."
+func TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall(t *testing.T) {
+	dir := t.TempDir()
+	helperDir := t.TempDir()
+	script := "#!/bin/sh\necho started\nsleep 5\necho should-not-reach-here\n"
+	if err := os.WriteFile(filepath.Join(helperDir, "stallcmd"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	command := filepath.Join(helperDir, "stallcmd")
+	start := time.Now()
+	output, _, _, timedOut, idleTimedOut := runAgentAttempt("prompt", dir, command, 0, 100*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if !idleTimedOut {
+		t.Error("idleTimedOut = false, want true — the shim went silent for far longer than idleTimeout")
+	}
+	if timedOut {
+		t.Error("timedOut = true, want false — no maxDuration was configured")
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("took %v — the idle watchdog should have killed the shim well before its 5s sleep ended", elapsed)
+	}
+	if !strings.Contains(output, "started") {
+		t.Errorf("output = %q, want it to contain the shim's output before it stalled", output)
 	}
 }
 
@@ -816,6 +850,94 @@ func TestFix_NoChangesNeededInstructionIsStageAware(t *testing.T) {
 	}
 	if !strings.Contains(got, "multi-stage ticket (reproduce → fix)") {
 		t.Errorf("final stage's prompt should name the full stage sequence: %q", got)
+	}
+}
+
+// idleStallAgentBody is a shell body that writes nothing and sleeps well
+// past any idle_timeout_minutes used in these tests (which use the smallest
+// real config value, 1 minute) — simulating an agent CLI that has gone
+// completely silent, the behavior the user observed live with opencode.
+const idleStallAgentBody = "  sleep 90"
+
+// idleTimeoutRoleConfig mirrors testRolesConfig but adds a 1-minute
+// idle_timeout_minutes to the default role — the smallest real value the
+// actual RoleConfig.IdleTimeoutMinutes (whole minutes) can express, so these
+// two tests necessarily take about a minute of real wall-clock time each to
+// prove the actual config -> kill -> retry path, on top of the fast,
+// sub-second unit test of the watchdog mechanism itself
+// (TestFix_RunAgentAttemptIdleTimeoutKillsAndReportsStall).
+const idleTimeoutRoleConfig = "roles:\n  default:\n    command: opencode implement\n    idle_timeout_minutes: 1\n  reviewer:\n    command: opencode review\n"
+
+// TestFix_IdleStallCyclesBackToTodo confirms a stalled agent (no output at
+// all) is treated as a transient glitch worth retrying — cycling back to
+// todo with Round incremented and a note about the stall, not going straight
+// to budget-exhausted the way a genuinely slow timeout still does.
+func TestFix_IdleStallCyclesBackToTodo(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origWd) })
+	initGitRepo(t)
+	cfg := "verify: \"exit 0\"\n" +
+		"wip-limit: 1\n" +
+		"flows:\n  feature:\n    stages: [work]\n    max_rounds: 2\n" +
+		idleTimeoutRoleConfig
+	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
+	ensureKanbanDirs()
+	fakeAgentAndReviewer(t, idleStallAgentBody, filepath.Join(t.TempDir(), "no-findings"))
+
+	writeCard(t, ".kanban/100-todo/card.md", "Test", "1")
+
+	runCycle(loadTestConfig(t))
+
+	if !fileExists(".kanban/100-todo/card.md") {
+		t.Fatal("a ticket whose agent stalled with no output should cycle back to todo for a retry, not block")
+	}
+	card := mustReadCard(t, ".kanban/100-todo/card.md")
+	if card.Status != model.StatusTodo {
+		t.Errorf("Status = %q, want %q", card.Status, model.StatusTodo)
+	}
+	if card.Round != 1 {
+		t.Errorf("Round = %d, want 1", card.Round)
+	}
+	if !strings.Contains(card.Content, "no output for 1 minutes") {
+		t.Error("the stall note was not written back onto the card")
+	}
+}
+
+// TestFix_IdleStallRoundsExhaustedBlocks confirms the idle-retry budget is
+// bounded: a ticket whose Round already sits at flow.MaxRounds (simulating
+// prior exhausted stall attempts) blocks with a distinct, honest reason
+// instead of cycling forever. Starting Round at the cap avoids re-running
+// the full multi-round march for real (the identical round > MaxRounds cap
+// logic is already proven generically by TestFix_ReviewRoundsCycleThenBlock
+// and TestFix_AgentErrorWithNoChangesCyclesThenBlocks) while still
+// confirming this new branch reaches it correctly.
+func TestFix_IdleStallRoundsExhaustedBlocks(t *testing.T) {
+	dir := t.TempDir()
+	origWd, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origWd) })
+	initGitRepo(t)
+	cfg := "verify: \"exit 0\"\n" +
+		"wip-limit: 1\n" +
+		"flows:\n  feature:\n    stages: [work]\n    max_rounds: 2\n" +
+		idleTimeoutRoleConfig
+	os.WriteFile("ekbn.config.yml", []byte(cfg), 0644)
+	ensureKanbanDirs()
+	fakeAgentAndReviewer(t, idleStallAgentBody, filepath.Join(t.TempDir(), "no-findings"))
+
+	mustWrite(t, ".kanban/100-todo/card.md",
+		"---\ntitle: Test\nid: 1\nstatus: todo\nround: 2\n---\n\nDo the thing.\n")
+
+	runCycle(loadTestConfig(t))
+
+	if !fileExists(".kanban/400-blocked/card.md") {
+		t.Fatal("a ticket already at its round budget should block, not cycle back, on another stall")
+	}
+	card := mustReadCard(t, ".kanban/400-blocked/card.md")
+	if card.Reason != "agent-idle-rounds-exhausted" {
+		t.Errorf("Reason = %q, want agent-idle-rounds-exhausted", card.Reason)
 	}
 }
 

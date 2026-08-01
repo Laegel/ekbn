@@ -9,11 +9,36 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"ekbn/internal/serve"
 	"ekbn/model"
 )
+
+// activityWriter is a no-op io.Writer that only records when it was last
+// written to — the single signal available for "is the agent still doing
+// anything," since ekbn has no other visibility into an opaque agent CLI
+// subprocess beyond the bytes it produces.
+type activityWriter struct {
+	lastWrite atomic.Int64 // unix nanos
+}
+
+func (a *activityWriter) Write(p []byte) (int, error) {
+	a.lastWrite.Store(time.Now().UnixNano())
+	return len(p), nil
+}
+
+func (a *activityWriter) idleFor() time.Duration {
+	return time.Since(time.Unix(0, a.lastWrite.Load()))
+}
+
+// idleWatchdogInterval is how often the idle watchdog polls for silence —
+// small enough that even a short test idleTimeout gets checked promptly,
+// cheap enough (an atomic load and a comparison) that it costs nothing at
+// real, minutes-scale production idleTimeout values.
+const idleWatchdogInterval = 200 * time.Millisecond
 
 // resolveRoleConfig looks up role in roles, falling back to roles["default"]
 // (reporting fellBack=true) when role is unset or not a configured key.
@@ -82,11 +107,16 @@ func envWithPath(path string) []string {
 // on PATH for that subprocess only: any git invocation is captured (a marker
 // file is touched) and fails immediately, so the agent's own attempt to use
 // git directly — bypassing the ekbn MCP tools — is both detected and
-// blocked. If maxDurationMinutes is set, the subprocess is killed once that
-// budget is exceeded and timedOut is reported — the one budget dimension
-// ekbn can enforce itself without depending on any particular CLI's own
-// accounting. Callers must not call this with an empty command — that case
-// means "nothing is configured to run" and is handled before this point.
+// blocked. If maxDuration is set, the subprocess is killed once that budget
+// is exceeded and timedOut is reported. If idleTimeout is set, it's killed
+// early — separately from maxDuration — once it produces no new stdout/
+// stderr output for that long, and idleTimedOut is reported instead; a
+// silent CLI is a different failure mode from a slow-but-working one, and
+// callers react to the two differently. Both are duration-based rather than
+// minute-counts so this is directly testable with sub-second values; callers
+// convert a role's *Minutes config fields to a Duration themselves. Callers
+// must not call this with an empty command — that case means "nothing is
+// configured to run" and is handled before this point.
 // readOnlyGitSubcommands cannot alter commit history or working tree
 // content under any arguments — the agent's own git shim executes these
 // against the real git rather than blocking the ticket. config/symbolic-ref/
@@ -104,7 +134,7 @@ var readOnlyGitSubcommands = []string{
 	"config", "symbolic-ref", "remote", "for-each-ref", "check-ignore",
 }
 
-func runAgentAttempt(prompt, dir, command string, maxDurationMinutes int) (output string, runErr error, usedGit, timedOut bool) {
+func runAgentAttempt(prompt, dir, command string, maxDuration, idleTimeout time.Duration) (output string, runErr error, usedGit, timedOut, idleTimedOut bool) {
 	shimDir, mkErr := os.MkdirTemp("", "ekbn-git-shim-")
 	env := os.Environ()
 	marker := ""
@@ -166,11 +196,15 @@ exit 1
 		env = envWithPath(shimDir + string(os.PathListSeparator) + os.Getenv("PATH"))
 	}
 
-	ctx := context.Background()
-	if maxDurationMinutes > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(maxDurationMinutes)*time.Minute)
-		defer cancel()
+	// cancel always exists, regardless of whether maxDuration is set, so the
+	// idle watchdog below has a way to kill the subprocess independently of
+	// (and typically well before) any configured hard deadline.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if maxDuration > 0 {
+		var timeoutCancel context.CancelFunc
+		ctx, timeoutCancel = context.WithTimeout(ctx, maxDuration)
+		defer timeoutCancel()
 	}
 
 	// cmd.Dir alone isn't always enough: some agent CLIs (opencode included)
@@ -187,14 +221,58 @@ exit 1
 	cmd := exec.CommandContext(ctx, argv[0], args...)
 	cmd.Dir = dir
 	cmd.Env = env
+	// A killed direct child (a shell script, typically) can leave its own
+	// children — e.g. a long-running tool it invoked — as orphans still
+	// holding the stdout/stderr pipes open; Wait() then blocks until those
+	// grandchildren exit on their own, regardless of cancellation. Killing
+	// the whole process group instead of just cmd.Process, plus a WaitDelay
+	// as a backstop, is what actually makes ctx cancellation (idle-timeout
+	// or the hard maxDuration) terminate the run promptly.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
 	var buf bytes.Buffer
-	cmd.Stdout = io.MultiWriter(os.Stdout, &buf)
-	cmd.Stderr = io.MultiWriter(os.Stderr, &buf)
+	activity := &activityWriter{}
+	activity.Write(nil) // seed lastWrite at launch, not the zero time
+	cmd.Stdout = io.MultiWriter(os.Stdout, &buf, activity)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &buf, activity)
+
+	var idleTriggered atomic.Bool
+	watchdogDone := make(chan struct{})
+	if idleTimeout > 0 {
+		go func() {
+			interval := idleWatchdogInterval
+			if idleTimeout/4 < interval {
+				interval = idleTimeout / 4
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-watchdogDone:
+					return
+				case <-ticker.C:
+					if activity.idleFor() > idleTimeout {
+						idleTriggered.Store(true)
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	runErr = cmd.Run()
+	close(watchdogDone)
 	timedOut = ctx.Err() == context.DeadlineExceeded
+	idleTimedOut = idleTriggered.Load()
 	usedGit = marker != "" && fileExists(marker)
-	return strings.TrimSpace(buf.String()), runErr, usedGit, timedOut
+	return strings.TrimSpace(buf.String()), runErr, usedGit, timedOut, idleTimedOut
 }
 
 // Card status transitions. TransitionStatus (in model) is the only thing
@@ -490,7 +568,8 @@ func runTicket(cfg serve.Config, card model.Card) {
 	mainBefore, _ := git(projectRoot, "status", "--short")
 	mainCheckoutMu.Unlock()
 
-	output, agentErr, usedGit, timedOut := runAgentAttempt(prompt, workDir, rc.Command, rc.MaxDurationMinutes)
+	output, agentErr, usedGit, timedOut, idleTimedOut := runAgentAttempt(prompt, workDir, rc.Command,
+		time.Duration(rc.MaxDurationMinutes)*time.Minute, time.Duration(rc.IdleTimeoutMinutes)*time.Minute)
 
 	mainCheckoutMu.Lock()
 	escErr := checkMainCheckoutUntouched(projectRoot, mainBefore)
@@ -499,6 +578,28 @@ func runTicket(cfg serve.Config, card model.Card) {
 		log.error("✋  Ticket #%s: %v — the agent likely escaped its worktree", id, escErr)
 		abandonAttempt(workDir, id, column, filename, preexisting)
 		transitionBlockedWithFindings(column, filename, "agent-escaped-worktree", escErr.Error())
+		return
+	}
+	// A stall (no output at all for idleTimeout, distinct from just taking a
+	// while to finish) is treated as a transient CLI glitch worth retrying,
+	// bounded the same way a reviewer's findings cycle a ticket back — rather
+	// than immediately spending the ticket's one shot at budget-exhausted the
+	// way a genuine MaxDurationMinutes timeout below still does.
+	if idleTimedOut {
+		round := card.Round + 1
+		if round > flow.MaxRounds {
+			log.warn("🔒  Ticket #%s exhausted its %d attempt budget — the agent kept stalling with no output", id, flow.MaxRounds)
+			abandonAttempt(workDir, id, column, filename, preexisting)
+			transitionBlockedWithFindings(column, filename, "agent-idle-rounds-exhausted",
+				fmt.Sprintf("The agent produced no output for %d minutes and was killed, on every attempt up to this stage's %d-round budget. Its last output before stalling:\n\n%s",
+					rc.IdleTimeoutMinutes, flow.MaxRounds, previewText(output, 2000)))
+			return
+		}
+		log.warn("💤  Ticket #%s's agent produced no output for %dm — treating as stalled (attempt %d/%d), retrying", id, rc.IdleTimeoutMinutes, round, flow.MaxRounds)
+		abandonAttempt(workDir, id, column, filename, preexisting)
+		cycleForReview(column, filename, round,
+			fmt.Sprintf("Attempt %d was killed after producing no output for %d minutes — likely stalled; retrying automatically. Its last output before stalling:\n\n%s",
+				round, rc.IdleTimeoutMinutes, previewText(output, 2000)))
 		return
 	}
 	if timedOut {
@@ -784,7 +885,25 @@ func runSpike(cfg serve.Config, path, column, filename string, card model.Card, 
 
 	preexisting := untrackedFiles(projectRoot)
 
-	output, agentErr, usedGit, timedOut := runAgentAttempt(prompt, projectRoot, rc.Command, rc.MaxDurationMinutes)
+	output, agentErr, usedGit, timedOut, idleTimedOut := runAgentAttempt(prompt, projectRoot, rc.Command,
+		time.Duration(rc.MaxDurationMinutes)*time.Minute, time.Duration(rc.IdleTimeoutMinutes)*time.Minute)
+	if idleTimedOut {
+		round := card.Round + 1
+		flow := cfg.FlowFor("spike")
+		if round > flow.MaxRounds {
+			resetWorkingTree(projectRoot, preexisting)
+			transitionBlockedWithFindings(column, filename, "agent-idle-rounds-exhausted",
+				fmt.Sprintf("The agent produced no output for %d minutes and was killed. Its last output before stalling:\n\n%s",
+					rc.IdleTimeoutMinutes, previewText(output, 2000)))
+			return
+		}
+		log.warn("💤  Spike #%s's agent produced no output for %dm — treating as stalled (attempt %d/%d), retrying", id, rc.IdleTimeoutMinutes, round, flow.MaxRounds)
+		resetWorkingTree(projectRoot, preexisting)
+		cycleForReview(column, filename, round,
+			fmt.Sprintf("Attempt %d was killed after producing no output for %d minutes — likely stalled; retrying automatically. Its last output before stalling:\n\n%s",
+				round, rc.IdleTimeoutMinutes, previewText(output, 2000)))
+		return
+	}
 	if timedOut {
 		resetWorkingTree(projectRoot, preexisting)
 		transitionBudgetExhausted(column, filename, fmt.Sprintf("exceeded %dm attempt budget for role %q", rc.MaxDurationMinutes, card.Role))

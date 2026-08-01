@@ -36,6 +36,16 @@ type RoleConfig struct {
 	Skills             []string `yaml:"skills"`
 	Command            string   `yaml:"command"`
 	MaxDurationMinutes int      `yaml:"max_duration_minutes"`
+	// IdleTimeoutMinutes kills the agent early if it produces no new output
+	// (nothing written to stdout/stderr) for this many minutes — distinct
+	// from MaxDurationMinutes, which caps total runtime regardless of
+	// whether the process is actively working. A CLI that stalls (goes
+	// silent without crashing or finishing) is treated as a transient
+	// glitch worth retrying, the same bounded way a reviewer's findings
+	// cycle a ticket back for another attempt; a genuine MaxDurationMinutes
+	// timeout still goes straight to budget-exhausted for a human. 0/unset
+	// disables idle detection, the same convention as MaxDurationMinutes.
+	IdleTimeoutMinutes int `yaml:"idle_timeout_minutes"`
 }
 
 // StageFlow is a stage sequence keyed by goal, not written into each item:
