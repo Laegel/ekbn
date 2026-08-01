@@ -70,6 +70,7 @@ type Card struct {
 	DependsOn    []string  `yaml:"depends_on" json:"depends_on"`
 	Unresolved   string    `yaml:"unresolved,omitempty" json:"unresolved"`
 	Reason       string    `yaml:"reason" json:"reason"`
+	Outcome      Outcome   `yaml:"outcome,omitempty" json:"outcome"`
 	LeaseOwner   string    `yaml:"lease_owner,omitempty" json:"lease_owner"`
 	LeaseExpires string    `yaml:"lease_expires,omitempty" json:"lease_expires"`
 	AttemptRef   string    `yaml:"attempt_ref,omitempty" json:"attempt_ref"`
